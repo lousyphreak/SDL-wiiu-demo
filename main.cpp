@@ -3,6 +3,14 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 
+static constexpr int MAX_TRACKED_GAMEPADS = 8;
+
+struct GamepadSlot
+{
+    SDL_Gamepad *gamepad;
+    SDL_JoystickID id;
+};
+
 struct AppState
 {
     SDL_Window *window;
@@ -11,9 +19,8 @@ struct AppState
     int background_width;
     int background_height;
     bool first_frame_complete;
-    unsigned int frame_count;
-    SDL_Gamepad *gamepad;
-    SDL_JoystickID gamepad_id;
+    GamepadSlot gamepads[MAX_TRACKED_GAMEPADS];
+    SDL_JoystickID active_gamepad_id;
     SDL_PowerState battery_state;
     int battery_percent;
     bool touch_down;
@@ -54,13 +61,63 @@ static bool FillCircle(SDL_Renderer *renderer, float center_x, float center_y, f
     return true;
 }
 
-static void CloseGamepad(AppState *state)
+static bool RenderMouseCursor(AppState *state, int width, int height)
 {
-    if (state->gamepad) {
-        SDL_CloseGamepad(state->gamepad);
-        state->gamepad = nullptr;
+    float mouse_x;
+    float mouse_y;
+    SDL_MouseButtonFlags buttons;
+
+    if (!state || !SDL_HasMouse() || SDL_GetMouseFocus() != state->window || !SDL_CursorVisible()) {
+        return true;
     }
-    state->gamepad_id = 0;
+
+    buttons = SDL_GetMouseState(&mouse_x, &mouse_y);
+    mouse_x = SDL_clamp(mouse_x, 0.0f, (float)(width - 1));
+    mouse_y = SDL_clamp(mouse_y, 0.0f, (float)(height - 1));
+
+    if (!SetColor(state->renderer, 0, 0, 0, 200) ||
+        !SDL_RenderLine(state->renderer, mouse_x + 1.0f, mouse_y - 10.0f, mouse_x + 1.0f, mouse_y + 10.0f) ||
+        !SDL_RenderLine(state->renderer, mouse_x - 10.0f, mouse_y + 1.0f, mouse_x + 10.0f, mouse_y + 1.0f)) {
+        return false;
+    }
+
+    if ((buttons & SDL_BUTTON_LMASK) != 0) {
+        if (!SetColor(state->renderer, 255, 200, 80, 255)) {
+            return false;
+        }
+    } else if ((buttons & SDL_BUTTON_RMASK) != 0) {
+        if (!SetColor(state->renderer, 255, 120, 200, 255)) {
+            return false;
+        }
+    } else if ((buttons & SDL_BUTTON_MMASK) != 0) {
+        if (!SetColor(state->renderer, 120, 255, 180, 255)) {
+            return false;
+        }
+    } else {
+        if (!SetColor(state->renderer, 255, 255, 255, 255)) {
+            return false;
+        }
+    }
+
+    if (!SDL_RenderLine(state->renderer, mouse_x, mouse_y - 10.0f, mouse_x, mouse_y + 10.0f) ||
+        !SDL_RenderLine(state->renderer, mouse_x - 10.0f, mouse_y, mouse_x + 10.0f, mouse_y) ||
+        !FillCircle(state->renderer, mouse_x, mouse_y, 2.5f)) {
+        return false;
+    }
+
+    if ((buttons & (SDL_BUTTON_LMASK | SDL_BUTTON_RMASK | SDL_BUTTON_MMASK)) != 0) {
+        if (!SetColor(state->renderer, 255, 255, 255, 180) ||
+            !FillCircle(state->renderer, mouse_x, mouse_y, 6.0f)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void ResetActiveGamepadState(AppState *state)
+{
+    state->active_gamepad_id = 0;
     state->battery_state = SDL_POWERSTATE_UNKNOWN;
     state->battery_percent = -1;
     state->touch_down = false;
@@ -69,32 +126,141 @@ static void CloseGamepad(AppState *state)
     state->touch_pressure = 0.0f;
 }
 
-static void OpenGamepad(AppState *state, SDL_JoystickID gamepad_id)
+static int FindGamepadSlot(const AppState *state, SDL_JoystickID gamepad_id)
 {
-    if (!state || state->gamepad_id == gamepad_id) {
+    if (!state || !gamepad_id) {
+        return -1;
+    }
+
+    for (int i = 0; i < MAX_TRACKED_GAMEPADS; ++i) {
+        if (state->gamepads[i].gamepad && state->gamepads[i].id == gamepad_id) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static int FindFreeGamepadSlot(const AppState *state)
+{
+    if (!state) {
+        return -1;
+    }
+
+    for (int i = 0; i < MAX_TRACKED_GAMEPADS; ++i) {
+        if (!state->gamepads[i].gamepad) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static void SelectFallbackGamepad(AppState *state)
+{
+    if (!state) {
         return;
     }
 
-    CloseGamepad(state);
+    for (int i = 0; i < MAX_TRACKED_GAMEPADS; ++i) {
+        if (state->gamepads[i].gamepad) {
+            state->active_gamepad_id = state->gamepads[i].id;
+            return;
+        }
+    }
 
-    state->gamepad = SDL_OpenGamepad(gamepad_id);
-    if (!state->gamepad) {
+    ResetActiveGamepadState(state);
+}
+
+static SDL_Gamepad *GetActiveGamepad(AppState *state)
+{
+    int slot = FindGamepadSlot(state, state->active_gamepad_id);
+
+    if (slot >= 0) {
+        return state->gamepads[slot].gamepad;
+    }
+
+    SelectFallbackGamepad(state);
+    if (!state->active_gamepad_id) {
+        return nullptr;
+    }
+
+    slot = FindGamepadSlot(state, state->active_gamepad_id);
+    if (slot < 0) {
+        ResetActiveGamepadState(state);
+        return nullptr;
+    }
+
+    return state->gamepads[slot].gamepad;
+}
+
+static void CloseGamepadSlot(AppState *state, int slot)
+{
+    if (!state || slot < 0 || slot >= MAX_TRACKED_GAMEPADS || !state->gamepads[slot].gamepad) {
+        return;
+    }
+
+    SDL_CloseGamepad(state->gamepads[slot].gamepad);
+    state->gamepads[slot].gamepad = nullptr;
+
+    if (state->active_gamepad_id == state->gamepads[slot].id) {
+        state->active_gamepad_id = 0;
+    }
+
+    state->gamepads[slot].id = 0;
+    SelectFallbackGamepad(state);
+}
+
+static void CloseAllGamepads(AppState *state)
+{
+    if (!state) {
+        return;
+    }
+
+    for (int i = 0; i < MAX_TRACKED_GAMEPADS; ++i) {
+        CloseGamepadSlot(state, i);
+    }
+}
+
+static void OpenGamepad(AppState *state, SDL_JoystickID gamepad_id)
+{
+    int slot;
+
+    if (!state || !gamepad_id) {
+        return;
+    }
+
+    slot = FindGamepadSlot(state, gamepad_id);
+    if (slot >= 0) {
+        state->active_gamepad_id = gamepad_id;
+        return;
+    }
+
+    slot = FindFreeGamepadSlot(state);
+    if (slot < 0) {
+        SDL_Log("No free gamepad slots for %" SDL_PRIu32, gamepad_id);
+        return;
+    }
+
+    state->gamepads[slot].gamepad = SDL_OpenGamepad(gamepad_id);
+    if (!state->gamepads[slot].gamepad) {
         SDL_Log("SDL_OpenGamepad failed for %" SDL_PRIu32 ": %s", gamepad_id, SDL_GetError());
         return;
     }
 
-    state->gamepad_id = SDL_GetGamepadID(state->gamepad);
-    SDL_Log("Opened gamepad: %s", SDL_GetGamepadName(state->gamepad));
+    state->gamepads[slot].id = SDL_GetGamepadID(state->gamepads[slot].gamepad);
+    state->active_gamepad_id = state->gamepads[slot].id;
+    SDL_Log("Opened gamepad: %s", SDL_GetGamepadName(state->gamepads[slot].gamepad));
 }
 
-static void OpenInitialGamepad(AppState *state)
+static void OpenInitialGamepads(AppState *state)
 {
     int count = 0;
     SDL_JoystickID *gamepads = SDL_GetGamepads(&count);
 
     if (gamepads) {
-        if (count > 0) {
-            OpenGamepad(state, gamepads[0]);
+        for (int i = 0; i < count; ++i) {
+            OpenGamepad(state, gamepads[i]);
         }
         SDL_free(gamepads);
     }
@@ -102,20 +268,29 @@ static void OpenInitialGamepad(AppState *state)
 
 static void PollGamepadState(AppState *state)
 {
-    if (!state->gamepad || !SDL_GamepadConnected(state->gamepad)) {
-        CloseGamepad(state);
+    SDL_Gamepad *gamepad;
+
+    for (int i = 0; i < MAX_TRACKED_GAMEPADS; ++i) {
+        if (state->gamepads[i].gamepad && !SDL_GamepadConnected(state->gamepads[i].gamepad)) {
+            CloseGamepadSlot(state, i);
+        }
+    }
+
+    gamepad = GetActiveGamepad(state);
+    if (!gamepad || !SDL_GamepadConnected(gamepad)) {
+        ResetActiveGamepadState(state);
         return;
     }
 
-    state->battery_state = SDL_GetGamepadPowerInfo(state->gamepad, &state->battery_percent);
+    state->battery_state = SDL_GetGamepadPowerInfo(gamepad, &state->battery_percent);
     state->touch_down = false;
     state->touch_x = 0.0f;
     state->touch_y = 0.0f;
     state->touch_pressure = 0.0f;
 
-    if (SDL_GetNumGamepadTouchpads(state->gamepad) > 0 &&
-        SDL_GetNumGamepadTouchpadFingers(state->gamepad, 0) > 0) {
-        SDL_GetGamepadTouchpadFinger(state->gamepad, 0, 0,
+    if (SDL_GetNumGamepadTouchpads(gamepad) > 0 &&
+        SDL_GetNumGamepadTouchpadFingers(gamepad, 0) > 0) {
+        SDL_GetGamepadTouchpadFinger(gamepad, 0, 0,
                                      &state->touch_down,
                                      &state->touch_x,
                                      &state->touch_y,
@@ -125,6 +300,7 @@ static void PollGamepadState(AppState *state)
 
 static bool RenderInputOverlay(AppState *state, int width, int height)
 {
+    SDL_Gamepad *active_gamepad = GetActiveGamepad(state);
     const float panel_x = 24.0f;
     const float panel_y = 24.0f;
     const float panel_w = 260.0f;
@@ -135,19 +311,19 @@ static bool RenderInputOverlay(AppState *state, int width, int height)
     const float touch_y = 24.0f;
     const SDL_FRect panel = { panel_x, panel_y, panel_w, panel_h };
     const SDL_FRect touch_rect = { touch_x, touch_y, touch_w, touch_h };
-    const bool has_gamepad = state->gamepad && SDL_GamepadConnected(state->gamepad);
-    const float left_x = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(state->gamepad, SDL_GAMEPAD_AXIS_LEFTX)) : 0.0f;
-    const float left_y = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(state->gamepad, SDL_GAMEPAD_AXIS_LEFTY)) : 0.0f;
-    const float right_x = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(state->gamepad, SDL_GAMEPAD_AXIS_RIGHTX)) : 0.0f;
-    const float right_y = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(state->gamepad, SDL_GAMEPAD_AXIS_RIGHTY)) : 0.0f;
-    const float left_trigger = has_gamepad ? SDL_max(0.0f, AxisToFloat(SDL_GetGamepadAxis(state->gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER))) : 0.0f;
-    const float right_trigger = has_gamepad ? SDL_max(0.0f, AxisToFloat(SDL_GetGamepadAxis(state->gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))) : 0.0f;
+    const bool has_gamepad = active_gamepad && SDL_GamepadConnected(active_gamepad);
+    const float left_x = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFTX)) : 0.0f;
+    const float left_y = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFTY)) : 0.0f;
+    const float right_x = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_RIGHTX)) : 0.0f;
+    const float right_y = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_RIGHTY)) : 0.0f;
+    const float left_trigger = has_gamepad ? SDL_max(0.0f, AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER))) : 0.0f;
+    const float right_trigger = has_gamepad ? SDL_max(0.0f, AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))) : 0.0f;
     const float stick_box = 64.0f;
     const float stick_radius = 6.0f;
     const float face_radius = 12.0f;
     const int battery_percent = (state->battery_percent >= 0) ? state->battery_percent : 0;
     const float battery_fill = SDL_clamp((float)battery_percent / 100.0f, 0.0f, 1.0f);
-    const SDL_FRect battery_back = { panel_x + 16.0f, panel_y + 16.0f, panel_w - 32.0f, 12.0f };
+    const SDL_FRect battery_back = { panel_x + 16.0f, panel_y + 16.0f, 120.0f, 12.0f };
     const SDL_FRect battery_fill_rect = { battery_back.x, battery_back.y, battery_back.w * battery_fill, battery_back.h };
     const SDL_FRect left_trigger_rect = { panel_x + 16.0f, panel_y + 40.0f, 96.0f, 16.0f };
     const SDL_FRect right_trigger_rect = { panel_x + panel_w - 112.0f, panel_y + 40.0f, 96.0f, 16.0f };
@@ -164,8 +340,8 @@ static bool RenderInputOverlay(AppState *state, int width, int height)
     const SDL_FRect start_rect = { panel_x + 144.0f, panel_y + 88.0f, 20.0f, 14.0f };
     const SDL_FRect misc_rect = { panel_x + 186.0f, panel_y + 88.0f, 20.0f, 14.0f };
 
-    auto button = [state, has_gamepad](SDL_GamepadButton id) {
-        return has_gamepad && SDL_GetGamepadButton(state->gamepad, id);
+    auto button = [active_gamepad, has_gamepad](SDL_GamepadButton id) {
+        return has_gamepad && SDL_GetGamepadButton(active_gamepad, id);
     };
     auto draw_outline = [state](const SDL_FRect &rect, Uint8 r, Uint8 g, Uint8 b, Uint8 a) {
         return SetColor(state->renderer, r, g, b, a) && SDL_RenderRect(state->renderer, &rect);
@@ -194,6 +370,28 @@ static bool RenderInputOverlay(AppState *state, int width, int height)
 
     if (!draw_fill(battery_back, 24, 32, 68, 255)) {
         return false;
+    }
+
+    for (int i = 0; i < MAX_TRACKED_GAMEPADS; ++i) {
+        const int row = i / 4;
+        const int column = i % 4;
+        const bool occupied = state->gamepads[i].gamepad != nullptr;
+        const bool selected = occupied && state->gamepads[i].id == state->active_gamepad_id;
+        const SDL_FRect slot_rect = {
+            panel_x + 156.0f + column * 22.0f,
+            panel_y + 12.0f + row * 14.0f,
+            16.0f,
+            10.0f
+        };
+
+        if (!draw_fill(slot_rect,
+                       selected ? 255 : (occupied ? 70 : 20),
+                       selected ? 220 : (occupied ? 180 : 28),
+                       selected ? 120 : (occupied ? 255 : 52),
+                       255) ||
+            !draw_outline(slot_rect, 0, 0, 0, 255)) {
+            return false;
+        }
     }
 
     switch (state->battery_state) {
@@ -324,40 +522,6 @@ static bool RenderInputOverlay(AppState *state, int width, int height)
     return true;
 }
 
-static void LogRendererCenterPixel(AppState *state, unsigned int frame_number, const char *stage)
-{
-    SDL_Rect rect;
-    SDL_Surface *surface;
-    Uint8 r = 0;
-    Uint8 g = 0;
-    Uint8 b = 0;
-    Uint8 a = 0;
-
-    if (!state || !state->renderer || state->background_width <= 0 || state->background_height <= 0) {
-        return;
-    }
-
-    rect.x = state->background_width / 2;
-    rect.y = state->background_height / 2;
-    rect.w = 1;
-    rect.h = 1;
-
-    surface = SDL_RenderReadPixels(state->renderer, &rect);
-    if (!surface) {
-        SDL_Log("Frame %u: %s readback failed: %s", frame_number, stage, SDL_GetError());
-        return;
-    }
-
-    if (SDL_ReadSurfacePixel(surface, 0, 0, &r, &g, &b, &a)) {
-        SDL_Log("Frame %u: %s center pixel is rgba(%u,%u,%u,%u) format=%s",
-                frame_number, stage, r, g, b, a, SDL_GetPixelFormatName(surface->format));
-    } else {
-        SDL_Log("Frame %u: %s readback pixel decode failed: %s", frame_number, stage, SDL_GetError());
-    }
-
-    SDL_DestroySurface(surface);
-}
-
 static bool RebuildBackgroundTexture(AppState *state)
 {
     int width = 0;
@@ -368,10 +532,6 @@ static bool RebuildBackgroundTexture(AppState *state)
     if (!SDL_GetRenderOutputSize(state->renderer, &width, &height)) {
         SDL_Log("SDL_GetRenderOutputSize failed: %s", SDL_GetError());
         return false;
-    }
-
-    if (state->frame_count <= 3) {
-        SDL_Log("Frame %u: output size is %dx%d", state->frame_count, width, height);
     }
 
     if (state->background && state->background_width == width && state->background_height == height) {
@@ -389,20 +549,12 @@ static bool RebuildBackgroundTexture(AppState *state)
         return false;
     }
 
-    if (state->frame_count <= 3) {
-        SDL_Log("Frame %u: created background target texture", state->frame_count);
-    }
-
     state->background_width = width;
     state->background_height = height;
 
     if (!SDL_SetRenderTarget(state->renderer, state->background)) {
         SDL_Log("SDL_SetRenderTarget(background) failed: %s", SDL_GetError());
         return false;
-    }
-
-    if (state->frame_count <= 3) {
-        SDL_Log("Frame %u: bound background target", state->frame_count);
     }
 
     if (!SDL_SetRenderDrawColor(state->renderer, 5, 8, 20, 255) ||
@@ -467,17 +619,9 @@ static bool RebuildBackgroundTexture(AppState *state)
         return false;
     }
 
-    if (state->frame_count <= 2) {
-        LogRendererCenterPixel(state, state->frame_count, "background-target");
-    }
-
     if (!SDL_SetRenderTarget(state->renderer, nullptr)) {
         SDL_Log("SDL_SetRenderTarget(reset) failed: %s", SDL_GetError());
         return false;
-    }
-
-    if (state->frame_count <= 3) {
-        SDL_Log("Frame %u: restored main render target", state->frame_count);
     }
 
     return true;
@@ -485,26 +629,22 @@ static bool RebuildBackgroundTexture(AppState *state)
 
 static bool RenderFrame(AppState *state)
 {
+    SDL_Gamepad *active_gamepad = GetActiveGamepad(state);
     const double time = (double)SDL_GetTicks() / 1000.0;
     const double tau = 6.283185307179586;
-    const unsigned int frame_number = ++state->frame_count;
-    const bool has_gamepad = state->gamepad && SDL_GamepadConnected(state->gamepad);
-    const float left_x = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(state->gamepad, SDL_GAMEPAD_AXIS_LEFTX)) : 0.0f;
-    const float left_y = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(state->gamepad, SDL_GAMEPAD_AXIS_LEFTY)) : 0.0f;
-    const float right_x = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(state->gamepad, SDL_GAMEPAD_AXIS_RIGHTX)) : 0.0f;
-    const float right_y = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(state->gamepad, SDL_GAMEPAD_AXIS_RIGHTY)) : 0.0f;
-    const float left_trigger = has_gamepad ? SDL_max(0.0f, AxisToFloat(SDL_GetGamepadAxis(state->gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER))) : 0.0f;
-    const float right_trigger = has_gamepad ? SDL_max(0.0f, AxisToFloat(SDL_GetGamepadAxis(state->gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))) : 0.0f;
+    const bool has_gamepad = active_gamepad && SDL_GamepadConnected(active_gamepad);
+    const float left_x = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFTX)) : 0.0f;
+    const float left_y = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFTY)) : 0.0f;
+    const float right_x = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_RIGHTX)) : 0.0f;
+    const float right_y = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_RIGHTY)) : 0.0f;
+    const float left_trigger = has_gamepad ? SDL_max(0.0f, AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER))) : 0.0f;
+    const float right_trigger = has_gamepad ? SDL_max(0.0f, AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))) : 0.0f;
     int width;
     int height;
     int horizon;
     int scene_center_x;
     int scene_center_y;
     float scene_energy;
-
-    if (frame_number <= 3) {
-        SDL_Log("Frame %u: entering RenderFrame", frame_number);
-    }
 
     if (!RebuildBackgroundTexture(state)) {
         return false;
@@ -517,23 +657,11 @@ static bool RenderFrame(AppState *state)
     scene_center_y = horizon - 24 + (int)(left_y * 70.0f);
     scene_energy = 1.0f + left_trigger + right_trigger;
 
-    if (frame_number <= 3) {
-        SDL_Log("Frame %u: background texture ready", frame_number);
-    }
-
     if (!SDL_SetRenderDrawColor(state->renderer, 128, 0, 128, 255) ||
         !SDL_RenderClear(state->renderer) ||
         !SDL_RenderTexture(state->renderer, state->background, nullptr, nullptr)) {
         SDL_Log("Failed to start frame: %s", SDL_GetError());
         return false;
-    }
-
-    if (frame_number <= 3) {
-        SDL_Log("Frame %u: drew cached background", frame_number);
-    }
-
-    if (frame_number <= 2) {
-        LogRendererCenterPixel(state, frame_number, "pre-present");
     }
 
     for (int i = 0; i < 10; ++i) {
@@ -620,22 +748,19 @@ static bool RenderFrame(AppState *state)
         }
     }
 
-    if (frame_number <= 3) {
-        SDL_Log("Frame %u: before present", frame_number);
-    }
-
     if (!RenderInputOverlay(state, width, height)) {
         SDL_Log("Failed to render input overlay: %s", SDL_GetError());
+        return false;
+    }
+
+    if (!RenderMouseCursor(state, width, height)) {
+        SDL_Log("Failed to render mouse cursor: %s", SDL_GetError());
         return false;
     }
 
     if (!SDL_RenderPresent(state->renderer)) {
         SDL_Log("SDL_RenderPresent failed: %s", SDL_GetError());
         return false;
-    }
-
-    if (frame_number <= 3) {
-        SDL_Log("Frame %u: present completed", frame_number);
     }
 
     if (!state->first_frame_complete) {
@@ -680,7 +805,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         return SDL_APP_FAILURE;
     }
 
-    OpenInitialGamepad(state);
+    OpenInitialGamepads(state);
     SDL_Log("AppInit complete");
     *appstate = state;
     return SDL_APP_CONTINUE;
@@ -703,15 +828,19 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         return SDL_APP_CONTINUE;
     }
 
-    if (event->type == SDL_EVENT_GAMEPAD_REMOVED && state->gamepad_id == event->gdevice.which) {
-        CloseGamepad(state);
+    if (event->type == SDL_EVENT_GAMEPAD_REMOVED) {
+        const int slot = FindGamepadSlot(state, event->gdevice.which);
+        if (slot >= 0) {
+            CloseGamepadSlot(state, slot);
+        }
         return SDL_APP_CONTINUE;
     }
 
     if (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
-        if (event->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH && state->gamepad &&
-            state->gamepad_id == event->gbutton.which) {
-            SDL_RumbleGamepad(state->gamepad, 0x5000, 0x9000, 140);
+        SDL_Gamepad *gamepad = GetActiveGamepad(state);
+        if (event->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH && gamepad &&
+            state->active_gamepad_id == event->gbutton.which) {
+            SDL_RumbleGamepad(gamepad, 0x5000, 0x9000, 140);
         }
     }
 
@@ -736,7 +865,7 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
     (void)result;
 
     if (state) {
-        CloseGamepad(state);
+        CloseAllGamepads(state);
         if (state->background) {
             SDL_DestroyTexture(state->background);
         }
