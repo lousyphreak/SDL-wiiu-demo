@@ -4,10 +4,17 @@
 #include <SDL3/SDL_main.h>
 
 static constexpr int MAX_TRACKED_GAMEPADS = 8;
+static constexpr int MAX_TRACKED_JOYSTICKS = 8;
 
 struct GamepadSlot
 {
     SDL_Gamepad *gamepad;
+    SDL_JoystickID id;
+};
+
+struct JoystickSlot
+{
+    SDL_Joystick *joystick;
     SDL_JoystickID id;
 };
 
@@ -19,6 +26,23 @@ struct SensorSnapshot
     float data[3];
 };
 
+enum ActiveRumbleDeviceKind
+{
+    ACTIVE_RUMBLE_DEVICE_NONE,
+    ACTIVE_RUMBLE_DEVICE_GAMEPAD,
+    ACTIVE_RUMBLE_DEVICE_JOYSTICK,
+};
+
+struct RumblePreview
+{
+    ActiveRumbleDeviceKind kind;
+    SDL_JoystickID id;
+    bool last_result;
+    Uint16 low;
+    Uint16 high;
+    Uint64 active_until_ns;
+};
+
 struct AppState
 {
     SDL_Window *window;
@@ -28,7 +52,9 @@ struct AppState
     int background_height;
     bool first_frame_complete;
     GamepadSlot gamepads[MAX_TRACKED_GAMEPADS];
+    JoystickSlot joysticks[MAX_TRACKED_JOYSTICKS];
     SDL_JoystickID active_gamepad_id;
+    SDL_JoystickID active_joystick_id;
     SDL_PowerState battery_state;
     int battery_percent;
     bool touch_down;
@@ -38,6 +64,7 @@ struct AppState
     SensorSnapshot accel_sensor;
     SensorSnapshot gyro_sensor;
     SensorSnapshot accel_l_sensor;
+    RumblePreview rumble;
 };
 
 static float AxisToFloat(Sint16 value)
@@ -146,6 +173,15 @@ static void ResetTrackedSensors(AppState *state)
     ResetSensorSnapshot(&state->accel_l_sensor);
 }
 
+static void ResetRumblePreview(RumblePreview *rumble)
+{
+    if (!rumble) {
+        return;
+    }
+
+    SDL_zero(*rumble);
+}
+
 static const char *GetSensorName(SDL_SensorType type)
 {
     switch (type) {
@@ -216,6 +252,15 @@ static void ResetActiveGamepadState(AppState *state)
     ResetTrackedSensors(state);
 }
 
+static void ResetActiveJoystickState(AppState *state)
+{
+    if (!state) {
+        return;
+    }
+
+    state->active_joystick_id = 0;
+}
+
 static int FindGamepadSlot(const AppState *state, SDL_JoystickID gamepad_id)
 {
     if (!state || !gamepad_id) {
@@ -246,6 +291,36 @@ static int FindFreeGamepadSlot(const AppState *state)
     return -1;
 }
 
+static int FindJoystickSlot(const AppState *state, SDL_JoystickID joystick_id)
+{
+    if (!state || !joystick_id) {
+        return -1;
+    }
+
+    for (int i = 0; i < MAX_TRACKED_JOYSTICKS; ++i) {
+        if (state->joysticks[i].joystick && state->joysticks[i].id == joystick_id) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+static int FindFreeJoystickSlot(const AppState *state)
+{
+    if (!state) {
+        return -1;
+    }
+
+    for (int i = 0; i < MAX_TRACKED_JOYSTICKS; ++i) {
+        if (!state->joysticks[i].joystick) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
 static void SelectFallbackGamepad(AppState *state)
 {
     if (!state) {
@@ -260,6 +335,22 @@ static void SelectFallbackGamepad(AppState *state)
     }
 
     ResetActiveGamepadState(state);
+}
+
+static void SelectFallbackJoystick(AppState *state)
+{
+    if (!state) {
+        return;
+    }
+
+    for (int i = 0; i < MAX_TRACKED_JOYSTICKS; ++i) {
+        if (state->joysticks[i].joystick) {
+            state->active_joystick_id = state->joysticks[i].id;
+            return;
+        }
+    }
+
+    ResetActiveJoystickState(state);
 }
 
 static SDL_Gamepad *GetActiveGamepad(AppState *state)
@@ -284,6 +375,94 @@ static SDL_Gamepad *GetActiveGamepad(AppState *state)
     return state->gamepads[slot].gamepad;
 }
 
+static SDL_Joystick *GetActiveJoystick(AppState *state)
+{
+    int slot;
+
+    if (!state) {
+        return nullptr;
+    }
+
+    slot = FindJoystickSlot(state, state->active_joystick_id);
+    if (slot >= 0) {
+        return state->joysticks[slot].joystick;
+    }
+
+    SelectFallbackJoystick(state);
+    if (!state->active_joystick_id) {
+        return nullptr;
+    }
+
+    slot = FindJoystickSlot(state, state->active_joystick_id);
+    if (slot < 0) {
+        ResetActiveJoystickState(state);
+        return nullptr;
+    }
+
+    return state->joysticks[slot].joystick;
+}
+
+static SDL_Gamepad *GetTrackedGamepad(AppState *state, SDL_JoystickID gamepad_id)
+{
+    const int slot = FindGamepadSlot(state, gamepad_id);
+    return (slot >= 0) ? state->gamepads[slot].gamepad : nullptr;
+}
+
+static SDL_Joystick *GetTrackedJoystick(AppState *state, SDL_JoystickID joystick_id)
+{
+    const int slot = FindJoystickSlot(state, joystick_id);
+    return (slot >= 0) ? state->joysticks[slot].joystick : nullptr;
+}
+
+static bool GamepadHasRumble(SDL_Gamepad *gamepad)
+{
+    return gamepad &&
+           SDL_GetBooleanProperty(SDL_GetGamepadProperties(gamepad),
+                                  SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN,
+                                  false);
+}
+
+static bool JoystickHasRumble(SDL_Joystick *joystick)
+{
+    return joystick &&
+           SDL_GetBooleanProperty(SDL_GetJoystickProperties(joystick),
+                                  SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN,
+                                  false);
+}
+
+static void UpdateRumblePreview(AppState *state, ActiveRumbleDeviceKind kind, SDL_JoystickID id,
+                                bool result, Uint16 low, Uint16 high, Uint32 duration_ms)
+{
+    if (!state) {
+        return;
+    }
+
+    state->rumble.kind = kind;
+    state->rumble.id = id;
+    state->rumble.last_result = result;
+    state->rumble.low = low;
+    state->rumble.high = high;
+    state->rumble.active_until_ns = result ? (SDL_GetTicksNS() + (Uint64)duration_ms * SDL_NS_PER_MS) : 0;
+}
+
+static void TriggerGamepadRumble(AppState *state, SDL_Gamepad *gamepad,
+                                 Uint16 low, Uint16 high, Uint32 duration_ms)
+{
+    const SDL_JoystickID id = gamepad ? SDL_GetGamepadID(gamepad) : 0;
+    const bool result = gamepad && SDL_RumbleGamepad(gamepad, low, high, duration_ms);
+
+    UpdateRumblePreview(state, ACTIVE_RUMBLE_DEVICE_GAMEPAD, id, result, low, high, duration_ms);
+}
+
+static void TriggerJoystickRumble(AppState *state, SDL_Joystick *joystick,
+                                  Uint16 low, Uint16 high, Uint32 duration_ms)
+{
+    const SDL_JoystickID id = joystick ? SDL_GetJoystickID(joystick) : 0;
+    const bool result = joystick && SDL_RumbleJoystick(joystick, low, high, duration_ms);
+
+    UpdateRumblePreview(state, ACTIVE_RUMBLE_DEVICE_JOYSTICK, id, result, low, high, duration_ms);
+}
+
 static void CloseGamepadSlot(AppState *state, int slot)
 {
     if (!state || slot < 0 || slot >= MAX_TRACKED_GAMEPADS || !state->gamepads[slot].gamepad) {
@@ -293,12 +472,37 @@ static void CloseGamepadSlot(AppState *state, int slot)
     SDL_CloseGamepad(state->gamepads[slot].gamepad);
     state->gamepads[slot].gamepad = nullptr;
 
+    if (state->rumble.kind == ACTIVE_RUMBLE_DEVICE_GAMEPAD &&
+        state->rumble.id == state->gamepads[slot].id) {
+        ResetRumblePreview(&state->rumble);
+    }
     if (state->active_gamepad_id == state->gamepads[slot].id) {
         state->active_gamepad_id = 0;
     }
 
     state->gamepads[slot].id = 0;
     SelectFallbackGamepad(state);
+}
+
+static void CloseJoystickSlot(AppState *state, int slot)
+{
+    if (!state || slot < 0 || slot >= MAX_TRACKED_JOYSTICKS || !state->joysticks[slot].joystick) {
+        return;
+    }
+
+    SDL_CloseJoystick(state->joysticks[slot].joystick);
+    state->joysticks[slot].joystick = nullptr;
+
+    if (state->rumble.kind == ACTIVE_RUMBLE_DEVICE_JOYSTICK &&
+        state->rumble.id == state->joysticks[slot].id) {
+        ResetRumblePreview(&state->rumble);
+    }
+    if (state->active_joystick_id == state->joysticks[slot].id) {
+        state->active_joystick_id = 0;
+    }
+
+    state->joysticks[slot].id = 0;
+    SelectFallbackJoystick(state);
 }
 
 static void CloseAllGamepads(AppState *state)
@@ -309,6 +513,17 @@ static void CloseAllGamepads(AppState *state)
 
     for (int i = 0; i < MAX_TRACKED_GAMEPADS; ++i) {
         CloseGamepadSlot(state, i);
+    }
+}
+
+static void CloseAllJoysticks(AppState *state)
+{
+    if (!state) {
+        return;
+    }
+
+    for (int i = 0; i < MAX_TRACKED_JOYSTICKS; ++i) {
+        CloseJoystickSlot(state, i);
     }
 }
 
@@ -344,6 +559,45 @@ static void OpenGamepad(AppState *state, SDL_JoystickID gamepad_id)
     EnableSensorIfPresent(state->gamepads[slot].gamepad, SDL_SENSOR_ACCEL);
     EnableSensorIfPresent(state->gamepads[slot].gamepad, SDL_SENSOR_GYRO);
     EnableSensorIfPresent(state->gamepads[slot].gamepad, SDL_SENSOR_ACCEL_L);
+    if (state->rumble.kind == ACTIVE_RUMBLE_DEVICE_NONE) {
+        state->rumble.kind = ACTIVE_RUMBLE_DEVICE_GAMEPAD;
+        state->rumble.id = state->gamepads[slot].id;
+    }
+}
+
+static void OpenJoystick(AppState *state, SDL_JoystickID joystick_id)
+{
+    int slot;
+
+    if (!state || !joystick_id || SDL_IsGamepad(joystick_id)) {
+        return;
+    }
+
+    slot = FindJoystickSlot(state, joystick_id);
+    if (slot >= 0) {
+        state->active_joystick_id = joystick_id;
+        return;
+    }
+
+    slot = FindFreeJoystickSlot(state);
+    if (slot < 0) {
+        SDL_Log("No free joystick slots for %" SDL_PRIu32, joystick_id);
+        return;
+    }
+
+    state->joysticks[slot].joystick = SDL_OpenJoystick(joystick_id);
+    if (!state->joysticks[slot].joystick) {
+        SDL_Log("SDL_OpenJoystick failed for %" SDL_PRIu32 ": %s", joystick_id, SDL_GetError());
+        return;
+    }
+
+    state->joysticks[slot].id = SDL_GetJoystickID(state->joysticks[slot].joystick);
+    state->active_joystick_id = state->joysticks[slot].id;
+    SDL_Log("Opened joystick: %s", SDL_GetJoystickName(state->joysticks[slot].joystick));
+    if (state->rumble.kind == ACTIVE_RUMBLE_DEVICE_NONE) {
+        state->rumble.kind = ACTIVE_RUMBLE_DEVICE_JOYSTICK;
+        state->rumble.id = state->joysticks[slot].id;
+    }
 }
 
 static void OpenInitialGamepads(AppState *state)
@@ -356,6 +610,19 @@ static void OpenInitialGamepads(AppState *state)
             OpenGamepad(state, gamepads[i]);
         }
         SDL_free(gamepads);
+    }
+}
+
+static void OpenInitialJoysticks(AppState *state)
+{
+    int count = 0;
+    SDL_JoystickID *joysticks = SDL_GetJoysticks(&count);
+
+    if (joysticks) {
+        for (int i = 0; i < count; ++i) {
+            OpenJoystick(state, joysticks[i]);
+        }
+        SDL_free(joysticks);
     }
 }
 
@@ -393,6 +660,168 @@ static void PollGamepadState(AppState *state)
     RefreshSensorSnapshot(gamepad, SDL_SENSOR_ACCEL, &state->accel_sensor);
     RefreshSensorSnapshot(gamepad, SDL_SENSOR_GYRO, &state->gyro_sensor);
     RefreshSensorSnapshot(gamepad, SDL_SENSOR_ACCEL_L, &state->accel_l_sensor);
+}
+
+static void PollJoystickState(AppState *state)
+{
+    for (int i = 0; i < MAX_TRACKED_JOYSTICKS; ++i) {
+        if (state->joysticks[i].joystick && !SDL_JoystickConnected(state->joysticks[i].joystick)) {
+            CloseJoystickSlot(state, i);
+        }
+    }
+
+    if (state->rumble.active_until_ns && SDL_GetTicksNS() >= state->rumble.active_until_ns) {
+        state->rumble.active_until_ns = 0;
+        state->rumble.low = 0;
+        state->rumble.high = 0;
+    }
+}
+
+static bool RenderRumbleWidget(AppState *state, const SDL_FRect &rect)
+{
+    ActiveRumbleDeviceKind kind = state->rumble.kind;
+    SDL_JoystickID id = state->rumble.id;
+    SDL_Gamepad *gamepad = nullptr;
+    SDL_Joystick *joystick = nullptr;
+    bool supported = false;
+    bool active = false;
+    bool failed = false;
+    float low = 0.0f;
+    float high = 0.0f;
+    Uint8 accent_r = 80;
+    Uint8 accent_g = 110;
+    Uint8 accent_b = 180;
+    const float padding = 10.0f;
+    const float bar_h = 14.0f;
+    const float bar_gap = 8.0f;
+    const float pulse_radius = 18.0f;
+    const SDL_FRect low_bar = { rect.x + padding, rect.y + rect.h - padding - bar_h * 2.0f - bar_gap, rect.w - padding * 2.0f, bar_h };
+    const SDL_FRect high_bar = { low_bar.x, low_bar.y + bar_h + bar_gap, low_bar.w, bar_h };
+
+    if (kind == ACTIVE_RUMBLE_DEVICE_GAMEPAD) {
+        gamepad = GetTrackedGamepad(state, id);
+    } else if (kind == ACTIVE_RUMBLE_DEVICE_JOYSTICK) {
+        joystick = GetTrackedJoystick(state, id);
+    }
+
+    if (!gamepad && !joystick) {
+        gamepad = GetActiveGamepad(state);
+        if (gamepad) {
+            kind = ACTIVE_RUMBLE_DEVICE_GAMEPAD;
+            id = SDL_GetGamepadID(gamepad);
+        }
+    }
+    if (!gamepad && !joystick) {
+        joystick = GetActiveJoystick(state);
+        if (joystick) {
+            kind = ACTIVE_RUMBLE_DEVICE_JOYSTICK;
+            id = SDL_GetJoystickID(joystick);
+        }
+    }
+
+    if (gamepad) {
+        supported = GamepadHasRumble(gamepad);
+        accent_r = 60;
+        accent_g = 210;
+        accent_b = 255;
+    } else if (joystick) {
+        supported = JoystickHasRumble(joystick);
+        accent_r = 255;
+        accent_g = 150;
+        accent_b = 110;
+    }
+
+    active = (state->rumble.kind == kind &&
+              state->rumble.id == id &&
+              state->rumble.last_result &&
+              state->rumble.active_until_ns > SDL_GetTicksNS());
+    failed = (state->rumble.kind == kind &&
+              state->rumble.id == id &&
+              !state->rumble.last_result);
+
+    if (active) {
+        low = (float)state->rumble.low / 65535.0f;
+        high = (float)state->rumble.high / 65535.0f;
+    }
+
+    if (failed) {
+        accent_r = 255;
+        accent_g = 110;
+        accent_b = 110;
+    } else if (!supported) {
+        accent_r = 80;
+        accent_g = 90;
+        accent_b = 120;
+    }
+
+    if (!SetColor(state->renderer, 8, 10, 24, 220) ||
+        !SDL_RenderFillRect(state->renderer, &rect) ||
+        !SetColor(state->renderer, accent_r, accent_g, accent_b, 255) ||
+        !SDL_RenderRect(state->renderer, &rect)) {
+        return false;
+    }
+
+    const SDL_FRect accent_strip = { rect.x + 1.0f, rect.y + 1.0f, rect.w - 2.0f, 4.0f };
+    if (!SetColor(state->renderer, accent_r, accent_g, accent_b, 255) ||
+        !SDL_RenderFillRect(state->renderer, &accent_strip)) {
+        return false;
+    }
+
+    const SDL_FRect source_indicator = {
+        rect.x + rect.w - 30.0f,
+        rect.y + 10.0f,
+        16.0f,
+        16.0f
+    };
+    if (!SetColor(state->renderer,
+                  kind == ACTIVE_RUMBLE_DEVICE_GAMEPAD ? accent_r : 24,
+                  kind == ACTIVE_RUMBLE_DEVICE_JOYSTICK ? accent_g : 32,
+                  accent_b,
+                  255) ||
+        !SDL_RenderFillRect(state->renderer, &source_indicator)) {
+        return false;
+    }
+
+    const float pulse_x = rect.x + padding + pulse_radius;
+    const float pulse_y = rect.y + rect.h * 0.5f - 6.0f;
+    const float pulse_glow = active ? SDL_max(low, high) : (supported ? 0.2f : 0.0f);
+    if (!SetColor(state->renderer,
+                  (Uint8)(40 + accent_r * pulse_glow),
+                  (Uint8)(40 + accent_g * pulse_glow),
+                  (Uint8)(50 + accent_b * pulse_glow),
+                  255) ||
+        !FillCircle(state->renderer, pulse_x, pulse_y, pulse_radius + pulse_glow * 10.0f)) {
+        return false;
+    }
+
+    const SDL_FRect pulse_core = { pulse_x - 6.0f, pulse_y - 6.0f, 12.0f, 12.0f };
+    if (!SetColor(state->renderer, 12, 18, 36, 255) ||
+        !SDL_RenderFillRect(state->renderer, &pulse_core)) {
+        return false;
+    }
+
+    const auto draw_bar = [state](const SDL_FRect &bar, float amount, Uint8 r, Uint8 g, Uint8 b) {
+        const SDL_FRect fill = { bar.x + 1.0f, bar.y + 1.0f, SDL_max(0.0f, (bar.w - 2.0f) * SDL_clamp(amount, 0.0f, 1.0f)), bar.h - 2.0f };
+        return SetColor(state->renderer, 20, 28, 60, 255) &&
+               SDL_RenderFillRect(state->renderer, &bar) &&
+               SetColor(state->renderer, 60, 90, 150, 255) &&
+               SDL_RenderRect(state->renderer, &bar) &&
+               SetColor(state->renderer, r, g, b, 255) &&
+               SDL_RenderFillRect(state->renderer, &fill);
+    };
+
+    if (!draw_bar(low_bar, low, 255, 170, 110) ||
+        !draw_bar(high_bar, high, 120, 230, 255)) {
+        return false;
+    }
+
+    if (!supported) {
+        return SetColor(state->renderer, 80, 90, 120, 255) &&
+               SDL_RenderLine(state->renderer, low_bar.x, low_bar.y, high_bar.x + high_bar.w, high_bar.y + high_bar.h) &&
+               SDL_RenderLine(state->renderer, high_bar.x + high_bar.w, low_bar.y, low_bar.x, high_bar.y + high_bar.h);
+    }
+
+    return true;
 }
 
 static bool RenderSensorWidget(AppState *state, const SDL_FRect &rect, const SensorSnapshot &sensor, float scale, Uint8 accent_r, Uint8 accent_g, Uint8 accent_b)
@@ -536,6 +965,7 @@ static bool RenderInputOverlay(AppState *state, int width, int height)
     const float panel_y = 24.0f;
     const float panel_w = 260.0f;
     const float panel_h = 220.0f;
+    const float rumble_h = 72.0f;
     const float touch_w = 260.0f;
     const float touch_h = touch_w * (480.0f / 854.0f);
     const float touch_x = (float)width - touch_w - 24.0f;
@@ -543,6 +973,7 @@ static bool RenderInputOverlay(AppState *state, int width, int height)
     const float sensor_y = touch_y + touch_h + 18.0f;
     const float sensor_h = SDL_max(0.0f, (float)height - sensor_y - 24.0f);
     const SDL_FRect panel = { panel_x, panel_y, panel_w, panel_h };
+    const SDL_FRect rumble_rect = { panel_x, panel_y + panel_h + 16.0f, panel_w, rumble_h };
     const SDL_FRect touch_rect = { touch_x, touch_y, touch_w, touch_h };
     const SDL_FRect sensor_rect = { touch_x, sensor_y, touch_w, sensor_h };
     const bool has_gamepad = active_gamepad && SDL_GamepadConnected(active_gamepad);
@@ -739,6 +1170,10 @@ static bool RenderInputOverlay(AppState *state, int width, int height)
 
     if (!draw_fill(touch_rect, 10, 16, 34, 180) ||
         !draw_outline(touch_rect, 80, 110, 180, 255)) {
+        return false;
+    }
+
+    if (!RenderRumbleWidget(state, rumble_rect)) {
         return false;
     }
 
@@ -1029,7 +1464,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     SDL_SetAppMetadata("SDL Wii U Render Demo", "1.0", "org.wiiu.sdl-demo");
     SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "60");
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
         return SDL_APP_FAILURE;
     }
@@ -1041,6 +1476,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     }
 
     ResetActiveGamepadState(state);
+    ResetActiveJoystickState(state);
+    ResetRumblePreview(&state->rumble);
 
     state->window = SDL_CreateWindow("SDL Wii U Render Demo", 640, 480, 0);
     if (!state->window) {
@@ -1058,6 +1495,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     }
 
     OpenInitialGamepads(state);
+    OpenInitialJoysticks(state);
     SDL_Log("AppInit complete");
     *appstate = state;
     return SDL_APP_CONTINUE;
@@ -1088,11 +1526,32 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
         return SDL_APP_CONTINUE;
     }
 
+    if (event->type == SDL_EVENT_JOYSTICK_ADDED) {
+        OpenJoystick(state, event->jdevice.which);
+        return SDL_APP_CONTINUE;
+    }
+
+    if (event->type == SDL_EVENT_JOYSTICK_REMOVED) {
+        const int slot = FindJoystickSlot(state, event->jdevice.which);
+        if (slot >= 0) {
+            CloseJoystickSlot(state, slot);
+        }
+        return SDL_APP_CONTINUE;
+    }
+
     if (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
         SDL_Gamepad *gamepad = GetActiveGamepad(state);
         if (event->gbutton.button == SDL_GAMEPAD_BUTTON_SOUTH && gamepad &&
             state->active_gamepad_id == event->gbutton.which) {
-            SDL_RumbleGamepad(gamepad, 0x5000, 0x9000, 140);
+            TriggerGamepadRumble(state, gamepad, 0x5000, 0x9000, 140);
+        }
+    }
+
+    if (event->type == SDL_EVENT_JOYSTICK_BUTTON_DOWN && !SDL_IsGamepad(event->jbutton.which)) {
+        SDL_Joystick *joystick = GetTrackedJoystick(state, event->jbutton.which);
+        if (joystick) {
+            state->active_joystick_id = event->jbutton.which;
+            TriggerJoystickRumble(state, joystick, 0x7000, 0x5000, 180);
         }
     }
 
@@ -1108,6 +1567,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     }
 
     PollGamepadState(state);
+    PollJoystickState(state);
     return RenderFrame(state) ? SDL_APP_CONTINUE : SDL_APP_FAILURE;
 }
 
@@ -1118,6 +1578,7 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
 
     if (state) {
         CloseAllGamepads(state);
+        CloseAllJoysticks(state);
         if (state->background) {
             SDL_DestroyTexture(state->background);
         }
