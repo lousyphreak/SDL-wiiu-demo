@@ -11,6 +11,14 @@ struct GamepadSlot
     SDL_JoystickID id;
 };
 
+struct SensorSnapshot
+{
+    bool available;
+    bool enabled;
+    float rate_hz;
+    float data[3];
+};
+
 struct AppState
 {
     SDL_Window *window;
@@ -27,6 +35,9 @@ struct AppState
     float touch_x;
     float touch_y;
     float touch_pressure;
+    SensorSnapshot accel_sensor;
+    SensorSnapshot gyro_sensor;
+    SensorSnapshot accel_l_sensor;
 };
 
 static float AxisToFloat(Sint16 value)
@@ -115,6 +126,84 @@ static bool RenderMouseCursor(AppState *state, int width, int height)
     return true;
 }
 
+static void ResetSensorSnapshot(SensorSnapshot *sensor)
+{
+    if (!sensor) {
+        return;
+    }
+
+    SDL_zero(*sensor);
+}
+
+static void ResetTrackedSensors(AppState *state)
+{
+    if (!state) {
+        return;
+    }
+
+    ResetSensorSnapshot(&state->accel_sensor);
+    ResetSensorSnapshot(&state->gyro_sensor);
+    ResetSensorSnapshot(&state->accel_l_sensor);
+}
+
+static const char *GetSensorName(SDL_SensorType type)
+{
+    switch (type) {
+    case SDL_SENSOR_ACCEL:
+        return "accel";
+    case SDL_SENSOR_GYRO:
+        return "gyro";
+    case SDL_SENSOR_ACCEL_L:
+        return "accel_l";
+    default:
+        return "sensor";
+    }
+}
+
+static void EnableSensorIfPresent(SDL_Gamepad *gamepad, SDL_SensorType type)
+{
+    const char *gamepad_name;
+
+    if (!gamepad || !SDL_GamepadHasSensor(gamepad, type)) {
+        return;
+    }
+
+    gamepad_name = SDL_GetGamepadName(gamepad);
+    if (!SDL_GamepadSensorEnabled(gamepad, type) &&
+        !SDL_SetGamepadSensorEnabled(gamepad, type, true)) {
+        SDL_Log("Failed to enable %s on %s: %s",
+                GetSensorName(type),
+                gamepad_name ? gamepad_name : "unknown gamepad",
+                SDL_GetError());
+        return;
+    }
+
+    SDL_Log("Enabled %s on %s (%.1f Hz)",
+            GetSensorName(type),
+            gamepad_name ? gamepad_name : "unknown gamepad",
+            SDL_GetGamepadSensorDataRate(gamepad, type));
+}
+
+static void RefreshSensorSnapshot(SDL_Gamepad *gamepad, SDL_SensorType type, SensorSnapshot *sensor)
+{
+    ResetSensorSnapshot(sensor);
+
+    if (!gamepad || !sensor || !SDL_GamepadHasSensor(gamepad, type)) {
+        return;
+    }
+
+    sensor->available = true;
+    sensor->enabled = SDL_GamepadSensorEnabled(gamepad, type);
+    sensor->rate_hz = SDL_GetGamepadSensorDataRate(gamepad, type);
+
+    if (sensor->enabled) {
+        if (!SDL_GetGamepadSensorData(gamepad, type, sensor->data, (int)SDL_arraysize(sensor->data))) {
+            sensor->enabled = false;
+            SDL_zero(sensor->data);
+        }
+    }
+}
+
 static void ResetActiveGamepadState(AppState *state)
 {
     state->active_gamepad_id = 0;
@@ -124,6 +213,7 @@ static void ResetActiveGamepadState(AppState *state)
     state->touch_x = 0.0f;
     state->touch_y = 0.0f;
     state->touch_pressure = 0.0f;
+    ResetTrackedSensors(state);
 }
 
 static int FindGamepadSlot(const AppState *state, SDL_JoystickID gamepad_id)
@@ -251,6 +341,9 @@ static void OpenGamepad(AppState *state, SDL_JoystickID gamepad_id)
     state->gamepads[slot].id = SDL_GetGamepadID(state->gamepads[slot].gamepad);
     state->active_gamepad_id = state->gamepads[slot].id;
     SDL_Log("Opened gamepad: %s", SDL_GetGamepadName(state->gamepads[slot].gamepad));
+    EnableSensorIfPresent(state->gamepads[slot].gamepad, SDL_SENSOR_ACCEL);
+    EnableSensorIfPresent(state->gamepads[slot].gamepad, SDL_SENSOR_GYRO);
+    EnableSensorIfPresent(state->gamepads[slot].gamepad, SDL_SENSOR_ACCEL_L);
 }
 
 static void OpenInitialGamepads(AppState *state)
@@ -296,6 +389,144 @@ static void PollGamepadState(AppState *state)
                                      &state->touch_y,
                                      &state->touch_pressure);
     }
+
+    RefreshSensorSnapshot(gamepad, SDL_SENSOR_ACCEL, &state->accel_sensor);
+    RefreshSensorSnapshot(gamepad, SDL_SENSOR_GYRO, &state->gyro_sensor);
+    RefreshSensorSnapshot(gamepad, SDL_SENSOR_ACCEL_L, &state->accel_l_sensor);
+}
+
+static bool RenderSensorWidget(AppState *state, const SDL_FRect &rect, const SensorSnapshot &sensor, float scale, Uint8 accent_r, Uint8 accent_g, Uint8 accent_b)
+{
+    const float padding = 10.0f;
+    const float plot_size = SDL_min(rect.h - padding * 2.0f, 52.0f);
+    const SDL_FRect plot_rect = { rect.x + padding, rect.y + padding, plot_size, plot_size };
+    const float bar_x = plot_rect.x + plot_rect.w + 12.0f;
+    const float bar_w = rect.x + rect.w - bar_x - padding;
+    const float bar_h = 10.0f;
+    const float bar_gap = 7.0f;
+    const float bars_y = rect.y + padding + SDL_max(0.0f, (plot_rect.h - (bar_h * 3.0f + bar_gap * 2.0f)) * 0.5f);
+    const SDL_FRect bars[3] = {
+        { bar_x, bars_y, bar_w, bar_h },
+        { bar_x, bars_y + bar_h + bar_gap, bar_w, bar_h },
+        { bar_x, bars_y + (bar_h + bar_gap) * 2.0f, bar_w, bar_h }
+    };
+    const Uint8 axis_colors[3][3] = {
+        { 255, 120, 120 },
+        { 120, 255, 160 },
+        { 120, 180, 255 }
+    };
+
+    if (!SetColor(state->renderer, 10, 16, 34, 220) ||
+        !SDL_RenderFillRect(state->renderer, &rect) ||
+        !SetColor(state->renderer,
+                  sensor.available ? accent_r : 46,
+                  sensor.available ? accent_g : 56,
+                  sensor.available ? accent_b : 72,
+                  255) ||
+        !SDL_RenderRect(state->renderer, &rect)) {
+        return false;
+    }
+
+    const SDL_FRect accent_strip = { rect.x + 1.0f, rect.y + 1.0f, rect.w - 2.0f, 4.0f };
+    if (!SetColor(state->renderer,
+                  sensor.enabled ? accent_r : (Uint8)(accent_r / 2),
+                  sensor.enabled ? accent_g : (Uint8)(accent_g / 2),
+                  sensor.enabled ? accent_b : (Uint8)(accent_b / 2),
+                  255) ||
+        !SDL_RenderFillRect(state->renderer, &accent_strip) ||
+        !SetColor(state->renderer, 60, 90, 150, 255) ||
+        !SDL_RenderRect(state->renderer, &plot_rect)) {
+        return false;
+    }
+
+    if (sensor.available) {
+        const int rate_pips = SDL_clamp((int)SDL_lroundf(sensor.rate_hz / 50.0f), 1, 5);
+
+        for (int i = 0; i < 5; ++i) {
+            const SDL_FRect pip_rect = {
+                rect.x + rect.w - 42.0f + i * 7.0f,
+                rect.y + 10.0f,
+                5.0f,
+                3.0f
+            };
+
+            if (!SetColor(state->renderer,
+                          i < rate_pips ? accent_r : 36,
+                          i < rate_pips ? accent_g : 44,
+                          i < rate_pips ? accent_b : 60,
+                          255) ||
+                !SDL_RenderFillRect(state->renderer, &pip_rect)) {
+                return false;
+            }
+        }
+    }
+
+    if (!SetColor(state->renderer, 34, 46, 84, 255) ||
+        !SDL_RenderLine(state->renderer,
+                        plot_rect.x + plot_rect.w * 0.5f, plot_rect.y,
+                        plot_rect.x + plot_rect.w * 0.5f, plot_rect.y + plot_rect.h) ||
+        !SDL_RenderLine(state->renderer,
+                        plot_rect.x, plot_rect.y + plot_rect.h * 0.5f,
+                        plot_rect.x + plot_rect.w, plot_rect.y + plot_rect.h * 0.5f)) {
+        return false;
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        const SDL_FRect midpoint = { bars[i].x + bars[i].w * 0.5f - 1.0f, bars[i].y, 2.0f, bars[i].h };
+
+        if (!SetColor(state->renderer, 18, 26, 56, 255) ||
+            !SDL_RenderFillRect(state->renderer, &bars[i]) ||
+            !SetColor(state->renderer, 60, 90, 150, 255) ||
+            !SDL_RenderRect(state->renderer, &bars[i]) ||
+            !SDL_RenderFillRect(state->renderer, &midpoint)) {
+            return false;
+        }
+    }
+
+    if (!sensor.available) {
+        return SetColor(state->renderer, 80, 90, 120, 255) &&
+               SDL_RenderLine(state->renderer, rect.x + 10.0f, rect.y + 16.0f, rect.x + rect.w - 10.0f, rect.y + rect.h - 16.0f) &&
+               SDL_RenderLine(state->renderer, rect.x + rect.w - 10.0f, rect.y + 16.0f, rect.x + 10.0f, rect.y + rect.h - 16.0f);
+    }
+
+    if (!sensor.enabled) {
+        return SetColor(state->renderer, 255, 200, 90, 255) &&
+               SDL_RenderLine(state->renderer, rect.x + 12.0f, rect.y + rect.h - 12.0f, rect.x + rect.w - 12.0f, rect.y + 12.0f);
+    }
+
+    {
+        const float normalized_x = SDL_clamp(sensor.data[0] / scale, -1.0f, 1.0f);
+        const float normalized_y = SDL_clamp(sensor.data[1] / scale, -1.0f, 1.0f);
+        const float normalized_z = SDL_clamp(sensor.data[2] / scale, -1.0f, 1.0f);
+        const float dot_x = plot_rect.x + plot_rect.w * 0.5f + normalized_x * (plot_rect.w * 0.34f);
+        const float dot_y = plot_rect.y + plot_rect.h * 0.5f - normalized_y * (plot_rect.h * 0.34f);
+        const float dot_radius = 4.0f + SDL_fabsf(normalized_z) * 5.0f;
+        const float values[3] = { normalized_x, normalized_y, normalized_z };
+
+        if (!SetColor(state->renderer, accent_r, accent_g, accent_b, 255) ||
+            !FillCircle(state->renderer, dot_x, dot_y, dot_radius)) {
+            return false;
+        }
+
+        for (int i = 0; i < 3; ++i) {
+            const float half_w = bars[i].w * 0.5f - 2.0f;
+            const float magnitude = SDL_fabsf(values[i]) * half_w;
+            SDL_FRect fill_rect;
+
+            if (values[i] >= 0.0f) {
+                fill_rect = { bars[i].x + bars[i].w * 0.5f, bars[i].y + 1.0f, magnitude, bars[i].h - 2.0f };
+            } else {
+                fill_rect = { bars[i].x + bars[i].w * 0.5f - magnitude, bars[i].y + 1.0f, magnitude, bars[i].h - 2.0f };
+            }
+
+            if (!SetColor(state->renderer, axis_colors[i][0], axis_colors[i][1], axis_colors[i][2], 255) ||
+                !SDL_RenderFillRect(state->renderer, &fill_rect)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
 }
 
 static bool RenderInputOverlay(AppState *state, int width, int height)
@@ -309,8 +540,11 @@ static bool RenderInputOverlay(AppState *state, int width, int height)
     const float touch_h = touch_w * (480.0f / 854.0f);
     const float touch_x = (float)width - touch_w - 24.0f;
     const float touch_y = 24.0f;
+    const float sensor_y = touch_y + touch_h + 18.0f;
+    const float sensor_h = SDL_max(0.0f, (float)height - sensor_y - 24.0f);
     const SDL_FRect panel = { panel_x, panel_y, panel_w, panel_h };
     const SDL_FRect touch_rect = { touch_x, touch_y, touch_w, touch_h };
+    const SDL_FRect sensor_rect = { touch_x, sensor_y, touch_w, sensor_h };
     const bool has_gamepad = active_gamepad && SDL_GamepadConnected(active_gamepad);
     const float left_x = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFTX)) : 0.0f;
     const float left_y = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFTY)) : 0.0f;
@@ -515,6 +749,22 @@ static bool RenderInputOverlay(AppState *state, int width, int height)
 
         if (!SetColor(state->renderer, 255, 170, 110, 255) ||
             !FillCircle(state->renderer, px, py, radius)) {
+            return false;
+        }
+    }
+
+    if (sensor_rect.h >= 90.0f) {
+        const float widget_gap = 8.0f;
+        const float widget_padding = 10.0f;
+        const float widget_h = (sensor_rect.h - widget_padding * 2.0f - widget_gap * 2.0f) / 3.0f;
+        const float widget_y = sensor_rect.y + widget_padding;
+        const SDL_FRect accel_rect = { sensor_rect.x, widget_y, sensor_rect.w, widget_h };
+        const SDL_FRect gyro_rect = { sensor_rect.x, widget_y + widget_h + widget_gap, sensor_rect.w, widget_h };
+        const SDL_FRect accel_l_rect = { sensor_rect.x, widget_y + (widget_h + widget_gap) * 2.0f, sensor_rect.w, widget_h };
+
+        if (!RenderSensorWidget(state, accel_rect, state->accel_sensor, SDL_STANDARD_GRAVITY * 2.0f, 255, 170, 90) ||
+            !RenderSensorWidget(state, gyro_rect, state->gyro_sensor, 4.0f, 90, 220, 255) ||
+            !RenderSensorWidget(state, accel_l_rect, state->accel_l_sensor, SDL_STANDARD_GRAVITY * 2.0f, 200, 110, 255)) {
             return false;
         }
     }
@@ -789,6 +1039,8 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         SDL_Log("Out of memory");
         return SDL_APP_FAILURE;
     }
+
+    ResetActiveGamepadState(state);
 
     state->window = SDL_CreateWindow("SDL Wii U Render Demo", 640, 480, 0);
     if (!state->window) {
