@@ -54,7 +54,7 @@ bool InitAudioDemo(AppState *state)
     SDL_GetAudioDeviceFormat(playback_device, &playback_device_spec, nullptr);
 
     state->audio.mix_spec.format = SDL_AUDIO_F32;
-    state->audio.mix_spec.channels = 2;
+    state->audio.mix_spec.channels = playback_device_spec.channels;
     state->audio.mix_spec.freq = playback_device_spec.freq;
     state->audio.playback_stream = SDL_CreateAudioStream(&state->audio.mix_spec, &playback_device_spec);
     if (!state->audio.playback_stream) {
@@ -110,19 +110,21 @@ void UpdateAudioDemo(AppState *state)
     constexpr float tau = 6.28318530717958647692f;
     constexpr int tone_chunk_frames = 512;
     constexpr int capture_chunk_frames = 256;
+    constexpr int max_demo_channels = 6;
 
-    float tone_buffer[tone_chunk_frames * 2];
-    float capture_buffer[capture_chunk_frames * 2];
-    float loopback_buffer[capture_chunk_frames * 2];
+    float tone_buffer[tone_chunk_frames * max_demo_channels];
+    float capture_buffer[capture_chunk_frames * max_demo_channels];
+    float loopback_buffer[capture_chunk_frames * max_demo_channels];
     SDL_Gamepad *active_gamepad;
     const bool *keyboard;
     bool has_gamepad;
     bool audio_active;
     bool monitoring_enabled;
+    int playback_channels;
     float right_x;
     float right_trigger;
     int queued_bytes;
-    const int target_queue_bytes = tone_chunk_frames * 6 * (int)sizeof(float) * 2;
+    int target_queue_bytes;
 
     if (!state || !state->audio.playback_stream) {
         return;
@@ -138,6 +140,9 @@ void UpdateAudioDemo(AppState *state)
                          ((keyboard && keyboard[SDL_SCANCODE_M]) ||
                           (has_gamepad && SDL_GetGamepadButton(active_gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)));
     state->audio.monitoring_enabled = monitoring_enabled;
+    playback_channels = SDL_max((int)state->audio.mix_spec.channels, 1);
+    queued_bytes = SDL_GetAudioStreamQueued(state->audio.playback_stream);
+    target_queue_bytes = tone_chunk_frames * 6 * (int)sizeof(float) * playback_channels;
 
     state->audio.tone_frequency = 220.0f + (right_x + 1.0f) * 220.0f;
     state->audio.tone_gain += ((0.05f + right_trigger * 0.18f) - state->audio.tone_gain) * 0.18f;
@@ -146,7 +151,7 @@ void UpdateAudioDemo(AppState *state)
     state->audio.loopback_level *= 0.82f;
 
     if (state->audio.capture_stream) {
-        const int minimum_capture_bytes = capture_chunk_frames * (int)sizeof(float) * 2;
+        const int minimum_capture_bytes = capture_chunk_frames * (int)sizeof(float) * playback_channels;
 
         while (SDL_GetAudioStreamAvailable(state->audio.capture_stream) >= minimum_capture_bytes) {
             const int br = SDL_GetAudioStreamData(state->audio.capture_stream, capture_buffer, minimum_capture_bytes);
@@ -175,7 +180,6 @@ void UpdateAudioDemo(AppState *state)
         }
     }
 
-    queued_bytes = SDL_GetAudioStreamQueued(state->audio.playback_stream);
     if (!audio_active) {
         if (queued_bytes > 0 && !SDL_ClearAudioStream(state->audio.playback_stream)) {
             SDL_Log("SDL_ClearAudioStream(playback) failed: %s", SDL_GetError());
@@ -192,12 +196,31 @@ void UpdateAudioDemo(AppState *state)
             const float base = SDL_sinf(phase);
             const float overtone = SDL_sinf(phase * 2.0f + 0.6f) * 0.25f;
             const float sample = (base + overtone) * state->audio.tone_gain;
-            const float left = sample * 0.9f;
-            const float right = sample * 0.9f;
+            const float front = sample * 0.9f;
 
-            tone_buffer[i * 2] = left;
-            tone_buffer[i * 2 + 1] = right;
-            tone_peak = SDL_max(tone_peak, SDL_max(SDL_fabsf(left), SDL_fabsf(right)));
+            for (int channel = 0; channel < playback_channels; ++channel) {
+                float value = front;
+
+                if (playback_channels >= 6) {
+                    switch (channel) {
+                    case 2:
+                        value = sample * 0.7f;
+                        break;
+                    case 3:
+                        value = sample * 0.45f;
+                        break;
+                    case 4:
+                    case 5:
+                        value = sample * 0.55f;
+                        break;
+                    default:
+                        break;
+                    }
+                }
+
+                tone_buffer[(i * playback_channels) + channel] = value;
+                tone_peak = SDL_max(tone_peak, SDL_fabsf(value));
+            }
 
             phase += phase_step;
             if (phase >= tau) {
@@ -208,12 +231,14 @@ void UpdateAudioDemo(AppState *state)
         state->audio.tone_phase = phase;
         state->audio.playback_level = SDL_max(state->audio.playback_level, tone_peak);
 
-        if (!SDL_PutAudioStreamData(state->audio.playback_stream, tone_buffer, (int)sizeof(tone_buffer))) {
+        if (!SDL_PutAudioStreamData(state->audio.playback_stream,
+                                    tone_buffer,
+                                    tone_chunk_frames * playback_channels * (int)sizeof(float))) {
             SDL_Log("SDL_PutAudioStreamData(tone) failed: %s", SDL_GetError());
             break;
         }
 
-        queued_bytes += (int)sizeof(tone_buffer);
+        queued_bytes += tone_chunk_frames * playback_channels * (int)sizeof(float);
     }
 }
 
