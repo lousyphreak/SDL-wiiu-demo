@@ -110,6 +110,7 @@ struct AppState
     SDL_Window *window;
     SDL_Renderer *renderer;
     SDL_Texture *background;
+    SDL_Texture *showcase_texture;
     int background_width;
     int background_height;
     bool first_frame_complete;

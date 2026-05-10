@@ -8,6 +8,8 @@
 namespace
 {
 
+constexpr int SHOWCASE_TEXTURE_SIZE = 128;
+
 bool RenderMouseCursor(AppState *state, int width, int height)
 {
     float mouse_x;
@@ -59,6 +61,93 @@ bool RenderMouseCursor(AppState *state, int width, int height)
         }
     }
 
+    return true;
+}
+
+bool EnsureShowcaseTexture(AppState *state)
+{
+    SDL_Texture *texture;
+
+    if (state->showcase_texture) {
+        return true;
+    }
+
+    texture = SDL_CreateTexture(state->renderer, SDL_PIXELFORMAT_RGBA8888, SDL_TEXTUREACCESS_TARGET,
+                                SHOWCASE_TEXTURE_SIZE, SHOWCASE_TEXTURE_SIZE);
+    if (!texture) {
+        SDL_Log("SDL_CreateTexture(showcase) failed: %s", SDL_GetError());
+        return false;
+    }
+
+    if (!SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND)) {
+        SDL_Log("SDL_SetTextureBlendMode(showcase) failed: %s", SDL_GetError());
+        SDL_DestroyTexture(texture);
+        return false;
+    }
+
+    if (!SDL_SetRenderTarget(state->renderer, texture)) {
+        SDL_Log("SDL_SetRenderTarget(showcase) failed: %s", SDL_GetError());
+        SDL_DestroyTexture(texture);
+        return false;
+    }
+
+    if (!SDL_SetRenderDrawColor(state->renderer, 0, 0, 0, 0) ||
+        !SDL_RenderClear(state->renderer)) {
+        SDL_Log("Failed to clear showcase texture: %s", SDL_GetError());
+        (void)SDL_SetRenderTarget(state->renderer, nullptr);
+        SDL_DestroyTexture(texture);
+        return false;
+    }
+
+    const SDL_FRect left_cells[] = {
+        { 8.0f, 8.0f, 50.0f, 50.0f },
+        { 8.0f, 70.0f, 50.0f, 50.0f },
+    };
+    const SDL_FRect right_cells[] = {
+        { 70.0f, 8.0f, 50.0f, 50.0f },
+        { 70.0f, 70.0f, 50.0f, 50.0f },
+    };
+    const SDL_FRect frame = { 0.5f, 0.5f, (float)SHOWCASE_TEXTURE_SIZE - 1.0f, (float)SHOWCASE_TEXTURE_SIZE - 1.0f };
+    SDL_FRect scanlines[6];
+
+    for (int i = 0; i < SDL_arraysize(scanlines); ++i) {
+        scanlines[i].x = 12.0f;
+        scanlines[i].y = 16.0f + (float)(i * 18);
+        scanlines[i].w = (float)(SHOWCASE_TEXTURE_SIZE - 24);
+        scanlines[i].h = 3.0f;
+    }
+
+    if (!SetColor(state->renderer, 24, 52, 108, 255) ||
+        !SDL_RenderFillRect(state->renderer, nullptr) ||
+        !SetColor(state->renderer, 50, 220, 255, 220) ||
+        !SDL_RenderFillRects(state->renderer, left_cells, SDL_arraysize(left_cells)) ||
+        !SetColor(state->renderer, 255, 96, 190, 220) ||
+        !SDL_RenderFillRects(state->renderer, right_cells, SDL_arraysize(right_cells)) ||
+        !SetColor(state->renderer, 255, 255, 255, 36) ||
+        !SDL_RenderFillRects(state->renderer, scanlines, SDL_arraysize(scanlines)) ||
+        !SetColor(state->renderer, 255, 190, 110, 255) ||
+        !FillCircle(state->renderer, SHOWCASE_TEXTURE_SIZE * 0.5f, SHOWCASE_TEXTURE_SIZE * 0.5f, 19.0f) ||
+        !SetColor(state->renderer, 255, 255, 255, 255) ||
+        !FillCircle(state->renderer, SHOWCASE_TEXTURE_SIZE * 0.5f, SHOWCASE_TEXTURE_SIZE * 0.5f, 7.0f) ||
+        !SetColor(state->renderer, 255, 255, 255, 255) ||
+        !SDL_RenderRect(state->renderer, &frame) ||
+        !SDL_RenderLine(state->renderer, SHOWCASE_TEXTURE_SIZE * 0.5f, 10.0f,
+                        SHOWCASE_TEXTURE_SIZE * 0.5f, SHOWCASE_TEXTURE_SIZE - 10.0f) ||
+        !SDL_RenderLine(state->renderer, 10.0f, SHOWCASE_TEXTURE_SIZE * 0.5f,
+                        SHOWCASE_TEXTURE_SIZE - 10.0f, SHOWCASE_TEXTURE_SIZE * 0.5f)) {
+        SDL_Log("Failed to build showcase texture: %s", SDL_GetError());
+        (void)SDL_SetRenderTarget(state->renderer, nullptr);
+        SDL_DestroyTexture(texture);
+        return false;
+    }
+
+    if (!SDL_SetRenderTarget(state->renderer, nullptr)) {
+        SDL_Log("SDL_SetRenderTarget(showcase reset) failed: %s", SDL_GetError());
+        SDL_DestroyTexture(texture);
+        return false;
+    }
+
+    state->showcase_texture = texture;
     return true;
 }
 
@@ -167,11 +256,114 @@ bool RebuildBackgroundTexture(AppState *state)
     return true;
 }
 
+bool RenderRendererShowcase(AppState *state, int width, int height, double time, int horizon,
+                            float left_x, float left_y, float right_x, float right_y,
+                            float left_trigger, float right_trigger)
+{
+    const float bars_x = ((float)width * 0.5f) - 114.0f;
+    const float bars_baseline = (float)SDL_min(height - 128, horizon + 52);
+    const float bar_width = 14.0f;
+    const float bar_step = 18.0f;
+    const float sprite_y = bars_baseline - 136.0f;
+    const float orbit_center_x = ((float)width * 0.5f) + right_x * 18.0f;
+    const float orbit_center_y = sprite_y + 34.0f + right_y * 10.0f;
+    const float orbit_radius = 42.0f + (left_trigger + right_trigger) * 30.0f;
+    const SDL_FRect full_src = { 0.0f, 0.0f, (float)SHOWCASE_TEXTURE_SIZE, (float)SHOWCASE_TEXTURE_SIZE };
+    const SDL_FRect left_src = { 0.0f, 0.0f, SHOWCASE_TEXTURE_SIZE * 0.5f, (float)SHOWCASE_TEXTURE_SIZE };
+    const SDL_FRect right_src = { SHOWCASE_TEXTURE_SIZE * 0.5f, 0.0f, SHOWCASE_TEXTURE_SIZE * 0.5f, (float)SHOWCASE_TEXTURE_SIZE };
+    SDL_FRect bars[12];
+    SDL_FRect caps[12];
+
+    for (int i = 0; i < SDL_arraysize(bars); ++i) {
+        const float phase = (float)(time * 4.0 + i * 0.65 + left_x * 1.7 + right_y);
+        const float energy = 0.35f + 0.65f * (0.5f + 0.5f * (float)std::sin(phase));
+        const float bar_height = 18.0f + energy * (44.0f + (left_trigger + right_trigger) * 36.0f);
+        bars[i].x = bars_x + bar_step * (float)i;
+        bars[i].y = bars_baseline - bar_height;
+        bars[i].w = bar_width;
+        bars[i].h = bar_height;
+        caps[i].x = bars[i].x;
+        caps[i].y = bars[i].y - 4.0f;
+        caps[i].w = bar_width;
+        caps[i].h = 2.0f;
+    }
+
+    const SDL_FRect left_copy = {
+        bars_x - 124.0f + left_x * 18.0f,
+        sprite_y + left_y * 10.0f,
+        86.0f,
+        86.0f
+    };
+    const SDL_FRect right_copy = {
+        bars_x + bar_step * (float)SDL_arraysize(bars) + 18.0f - left_x * 18.0f,
+        sprite_y - left_y * 10.0f,
+        86.0f,
+        86.0f
+    };
+    const SDL_FRect center_spin = {
+        orbit_center_x - 52.0f,
+        orbit_center_y - 52.0f,
+        104.0f,
+        104.0f
+    };
+    const SDL_FRect orbit_spin = {
+        orbit_center_x + orbit_radius * (float)std::cos(time * 1.6 + right_x) - 34.0f,
+        orbit_center_y + orbit_radius * (float)std::sin(time * 1.6 + right_y) - 34.0f,
+        68.0f,
+        68.0f
+    };
+    const SDL_FRect counter_spin = {
+        orbit_center_x + orbit_radius * 0.72f * (float)std::cos(-time * 1.1 + left_y) - 28.0f,
+        orbit_center_y + orbit_radius * 0.72f * (float)std::sin(-time * 1.1 + left_x) - 28.0f,
+        56.0f,
+        56.0f
+    };
+
+    if (!SetColor(state->renderer, 64, 240, 255, 180) ||
+        !SDL_RenderFillRects(state->renderer, bars, SDL_arraysize(bars)) ||
+        !SetColor(state->renderer, 255, 255, 255, 220) ||
+        !SDL_RenderFillRects(state->renderer, caps, SDL_arraysize(caps)) ||
+        !SDL_SetTextureColorMod(state->showcase_texture, 255, 255, 255) ||
+        !SDL_SetTextureAlphaMod(state->showcase_texture, 224) ||
+        !SDL_RenderTexture(state->renderer, state->showcase_texture, &left_src, &left_copy) ||
+        !SDL_SetTextureColorMod(state->showcase_texture, 255, 170, 220) ||
+        !SDL_SetTextureAlphaMod(state->showcase_texture, 208) ||
+        !SDL_RenderTexture(state->renderer, state->showcase_texture, &right_src, &right_copy) ||
+        !SDL_SetTextureColorMod(state->showcase_texture, 120, 235, 255) ||
+        !SDL_SetTextureAlphaMod(state->showcase_texture, 210) ||
+        !SDL_RenderTextureRotated(state->renderer, state->showcase_texture, &full_src, &center_spin,
+                                  time * 45.0, nullptr, SDL_FLIP_NONE) ||
+        !SDL_SetTextureColorMod(state->showcase_texture, 255, 220, 120) ||
+        !SDL_SetTextureAlphaMod(state->showcase_texture, 196) ||
+        !SDL_RenderTextureRotated(state->renderer, state->showcase_texture, &full_src, &orbit_spin,
+                                  -time * 110.0, nullptr, SDL_FLIP_HORIZONTAL) ||
+        !SDL_SetTextureColorMod(state->showcase_texture, 180, 255, 150) ||
+        !SDL_SetTextureAlphaMod(state->showcase_texture, 188) ||
+        !SDL_RenderTextureRotated(state->renderer, state->showcase_texture, &full_src, &counter_spin,
+                                  time * 150.0, nullptr, SDL_FLIP_VERTICAL) ||
+        !SDL_SetTextureColorMod(state->showcase_texture, 255, 255, 255) ||
+        !SDL_SetTextureAlphaMod(state->showcase_texture, 255)) {
+        SDL_Log("Failed to render renderer showcase: %s", SDL_GetError());
+        return false;
+    }
+
+    if (!SetColor(state->renderer, 220, 240, 255, 255) ||
+        !SDL_RenderDebugText(state->renderer, bars_x - 18.0f, sprite_y - 16.0f,
+                             "copy / copyex / fillrects") ||
+        !SDL_RenderDebugText(state->renderer, bars_x + 18.0f, bars_baseline + 10.0f,
+                             "batched fill rects")) {
+        SDL_Log("Failed to label renderer showcase: %s", SDL_GetError());
+        return false;
+    }
+
+    return true;
+}
+
 } // namespace
 
 void DestroySceneResources(AppState *state)
 {
-    if (!state || !state->background) {
+    if (!state) {
         return;
     }
 
@@ -179,6 +371,9 @@ void DestroySceneResources(AppState *state)
     state->background = nullptr;
     state->background_width = 0;
     state->background_height = 0;
+
+    SDL_DestroyTexture(state->showcase_texture);
+    state->showcase_texture = nullptr;
 }
 
 bool RenderFrame(AppState *state)
@@ -201,6 +396,10 @@ bool RenderFrame(AppState *state)
     float scene_energy;
 
     if (!RebuildBackgroundTexture(state)) {
+        return false;
+    }
+
+    if (!EnsureShowcaseTexture(state)) {
         return false;
     }
 
@@ -300,6 +499,12 @@ bool RenderFrame(AppState *state)
             SDL_Log("Failed to render streak: %s", SDL_GetError());
             return false;
         }
+    }
+
+    if (!RenderRendererShowcase(state, width, height, time, horizon, left_x, left_y,
+                                right_x, right_y, left_trigger, right_trigger)) {
+        SDL_Log("Failed to render renderer showcase: %s", SDL_GetError());
+        return false;
     }
 
     if (!RenderInputOverlay(state, width, height)) {

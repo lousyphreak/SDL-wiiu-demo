@@ -50,6 +50,14 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         return SDL_APP_FAILURE;
     }
 
+    if (!SDL_SetRenderDrawBlendMode(state->renderer, SDL_BLENDMODE_BLEND)) {
+        SDL_Log("SDL_SetRenderDrawBlendMode failed: %s", SDL_GetError());
+        SDL_DestroyRenderer(state->renderer);
+        SDL_DestroyWindow(state->window);
+        SDL_free(state);
+        return SDL_APP_FAILURE;
+    }
+
     if (!InitAudioDemo(state)) {
         SDL_DestroyRenderer(state->renderer);
         SDL_DestroyWindow(state->window);
