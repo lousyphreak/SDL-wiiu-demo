@@ -79,6 +79,32 @@ struct StorageDemoState
     char user_error[96];
 };
 
+struct TimeDemoState
+{
+    SDL_TimerID timer_id;
+    SDL_AtomicU32 timer_pulse_count;
+    Uint32 observed_timer_pulse_count;
+    Uint64 timer_interval_ns;
+    Uint64 last_timer_observation_ns;
+    Uint64 timer_observed_period_ns;
+    Uint64 performance_frequency;
+    Uint64 last_performance_counter;
+    Uint64 frame_delta_ns;
+    Uint64 delay_request_ns;
+    Uint64 delay_elapsed_ns;
+    SDL_Time current_time;
+    SDL_DateTime utc_time;
+    SDL_DateTime local_time;
+    SDL_DateFormat date_format;
+    SDL_TimeFormat time_format;
+    Uint64 roundtrip_error_ns;
+    bool locale_ready;
+    bool current_time_ready;
+    bool utc_ready;
+    bool local_ready;
+    bool roundtrip_ready;
+};
+
 struct AppState
 {
     SDL_Window *window;
@@ -103,4 +129,5 @@ struct AppState
     RumblePreview rumble;
     AudioDemoState audio;
     StorageDemoState storage;
+    TimeDemoState time_demo;
 };

@@ -8,6 +8,7 @@
 #include "input_demo.h"
 #include "scene_demo.h"
 #include "storage_demo.h"
+#include "time_demo.h"
 
 SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 {
@@ -32,6 +33,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     ResetInputDemoState(state);
     ResetAudioDemoState(&state->audio);
     ResetStorageDemoState(&state->storage);
+    ResetTimeDemoState(&state->time_demo);
 
     state->window = SDL_CreateWindow("SDL Wii U Render Demo", 640, 480, 0);
     if (!state->window) {
@@ -56,6 +58,15 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     }
 
     if (!InitStorageDemo(state)) {
+        ShutdownAudioDemo(state);
+        SDL_DestroyRenderer(state->renderer);
+        SDL_DestroyWindow(state->window);
+        SDL_free(state);
+        return SDL_APP_FAILURE;
+    }
+
+    if (!InitTimeDemo(state)) {
+        ShutdownTimeDemo(state);
         ShutdownAudioDemo(state);
         SDL_DestroyRenderer(state->renderer);
         SDL_DestroyWindow(state->window);
@@ -125,6 +136,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
 
     PollInputDemo(state);
     UpdateAudioDemo(state);
+    UpdateTimeDemo(state);
     return RenderFrame(state) ? SDL_APP_CONTINUE : SDL_APP_FAILURE;
 }
 
@@ -135,6 +147,7 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
 
     if (state) {
         ShutdownInputDemo(state);
+        ShutdownTimeDemo(state);
         ShutdownAudioDemo(state);
         DestroySceneResources(state);
         if (state->renderer) {

@@ -64,6 +64,51 @@ Uint32 HashStorageBytes(const Uint8 *bytes, size_t length)
     return hash;
 }
 
+void FormatDateTimeLine(char *destination, size_t destination_size, const char *label, const SDL_DateTime &dt, bool ready)
+{
+    int offset_hours;
+    int offset_minutes;
+    const char sign = (dt.utc_offset < 0) ? '-' : '+';
+    const int absolute_offset = (dt.utc_offset < 0) ? -dt.utc_offset : dt.utc_offset;
+
+    if (!destination || destination_size == 0) {
+        return;
+    }
+
+    if (!ready) {
+        SDL_strlcpy(destination, "time unavailable", destination_size);
+        return;
+    }
+
+    offset_hours = absolute_offset / 3600;
+    offset_minutes = (absolute_offset % 3600) / 60;
+    SDL_snprintf(destination, destination_size,
+                 "%s %04d-%02d-%02d %02d:%02d:%02d.%03d %c%02d:%02d",
+                 label,
+                 dt.year, dt.month, dt.day,
+                 dt.hour, dt.minute, dt.second,
+                 dt.nanosecond / SDL_NS_PER_MS,
+                 sign, offset_hours, offset_minutes);
+}
+
+const char *GetDateFormatLabel(SDL_DateFormat format)
+{
+    switch (format) {
+    case SDL_DATE_FORMAT_DDMMYYYY:
+        return "DMY";
+    case SDL_DATE_FORMAT_MMDDYYYY:
+        return "MDY";
+    case SDL_DATE_FORMAT_YYYYMMDD:
+    default:
+        return "YMD";
+    }
+}
+
+const char *GetTimeFormatLabel(SDL_TimeFormat format)
+{
+    return (format == SDL_TIME_FORMAT_12HR) ? "12h" : "24h";
+}
+
 void RefreshStoragePaths(StorageDemoState *storage)
 {
     const char *base_path;
@@ -271,6 +316,7 @@ bool InitStorageDemo(AppState *state)
 bool RenderStorageWidget(AppState *state, const SDL_FRect &rect)
 {
     const StorageDemoState &storage = state->storage;
+    const TimeDemoState &time_demo = state->time_demo;
     const float padding = 10.0f;
     const float line_height = (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 2.0f;
     const float text_x = rect.x + padding;
@@ -281,6 +327,8 @@ bool RenderStorageWidget(AppState *state, const SDL_FRect &rect)
     const Uint8 accent_r = storage.user_ready ? 120 : 255;
     const Uint8 accent_g = storage.user_ready ? 220 : 120;
     const Uint8 accent_b = storage.title_ready ? 255 : 140;
+    char utc_line[96];
+    char local_line[96];
 
     if (!SetColor(state->renderer, 8, 12, 28, 228) ||
         !SDL_RenderFillRect(state->renderer, &rect) ||
@@ -328,23 +376,39 @@ bool RenderStorageWidget(AppState *state, const SDL_FRect &rect)
         }
     }
 
+    FormatDateTimeLine(utc_line, sizeof(utc_line), "utc", time_demo.utc_time, time_demo.utc_ready);
+    FormatDateTimeLine(local_line, sizeof(local_line), "loc", time_demo.local_time, time_demo.local_ready);
+
     if (!SetColor(state->renderer, 230, 240, 255, 255) ||
-        !SDL_RenderDebugText(state->renderer, text_x, text_y, "storage") ||
+        !SDL_RenderDebugText(state->renderer, text_x, text_y, "storage + time") ||
         !SDL_RenderDebugTextFormat(state->renderer, text_x, text_y + line_height,
-                                   "title %s  %llu bytes",
-                                   storage.title_ready ? "ok" : "miss",
-                                   (unsigned long long)storage.title_bytes) ||
+                                   "title %s  %llu bytes  save %s  count %u",
+                                    storage.title_ready ? "ok" : "miss",
+                                    (unsigned long long)storage.title_bytes,
+                                    storage.user_ready ? (storage.last_save_ok ? "flushed" : "open") : "fail",
+                                    (unsigned int)storage.save_count) ||
+        !SDL_RenderDebugTextFormat(state->renderer, text_x, text_y + line_height * 3.0f,
+                                   "free %.1f MB  NORTH/P +1  WEST/R reset",
+                                    (double)storage.space_remaining / (1024.0 * 1024.0)) ||
         !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 2.0f,
                              storage.title_ready ? storage.title_preview : storage.title_error) ||
-        !SDL_RenderDebugTextFormat(state->renderer, text_x, text_y + line_height * 3.0f,
-                                   "save  %s  count %u  free %.1f MB",
-                                   storage.user_ready ? (storage.last_save_ok ? "flushed" : "open") : "fail",
-                                   (unsigned int)storage.save_count,
-                                   (double)storage.space_remaining / (1024.0 * 1024.0)) ||
-        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 4.0f,
-                             storage.user_ready ? storage.pref_path : storage.user_error) ||
-        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 5.0f,
-                             "NORTH/P +1   WEST/R reset   title via SDL_OpenTitleStorage")) {
+        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 4.0f, utc_line) ||
+        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 5.0f, local_line) ||
+        !SDL_RenderDebugTextFormat(state->renderer, text_x, text_y + line_height * 6.0f,
+                                   "pref %s %s  rt %.3f ms",
+                                   time_demo.locale_ready ? GetDateFormatLabel(time_demo.date_format) : "---",
+                                   time_demo.locale_ready ? GetTimeFormatLabel(time_demo.time_format) : "---",
+                                   (double)time_demo.roundtrip_error_ns / (double)SDL_NS_PER_MS) ||
+        !SDL_RenderDebugTextFormat(state->renderer, text_x, text_y + line_height * 7.0f,
+                                   "perf %.1fMHz up %.1fs frame %.2fms",
+                                   (double)time_demo.performance_frequency / 1000000.0,
+                                   (double)SDL_GetTicksNS() / (double)SDL_NS_PER_SECOND,
+                                   (double)time_demo.frame_delta_ns / (double)SDL_NS_PER_MS) ||
+        !SDL_RenderDebugTextFormat(state->renderer, text_x, text_y + line_height * 8.0f,
+                                   "delay %.2fms timer %u @ %.2fms",
+                                   (double)time_demo.delay_elapsed_ns / (double)SDL_NS_PER_MS,
+                                   (unsigned int)time_demo.observed_timer_pulse_count,
+                                   (double)(time_demo.timer_observed_period_ns ? time_demo.timer_observed_period_ns : time_demo.timer_interval_ns) / (double)SDL_NS_PER_MS)) {
         return false;
     }
 

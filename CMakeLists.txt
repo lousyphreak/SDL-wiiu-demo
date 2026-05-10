@@ -9,7 +9,8 @@ add_executable(sdl-demo
    input_demo.cpp
    render_utils.cpp
    scene_demo.cpp
-   storage_demo.cpp)
+   storage_demo.cpp
+   time_demo.cpp)
 
 target_compile_features(sdl-demo PRIVATE cxx_std_17)
 target_link_libraries(sdl-demo PRIVATE SDL3::SDL3)
