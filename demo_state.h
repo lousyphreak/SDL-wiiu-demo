@@ -119,6 +119,17 @@ struct CameraDemoState
     char status_text[96];
 };
 
+struct PlatformTextUiDemoState
+{
+    bool screen_keyboard_supported;
+    bool awaiting_virtual_text;
+    char keyboard_status[96];
+    char entered_text[64];
+    char last_text[96];
+    char message_box_status[96];
+    char url_status[96];
+};
+
 struct AppState
 {
     SDL_Window *window;
@@ -146,4 +157,5 @@ struct AppState
     StorageDemoState storage;
     TimeDemoState time_demo;
     CameraDemoState camera_demo;
+    PlatformTextUiDemoState platform_ui;
 };

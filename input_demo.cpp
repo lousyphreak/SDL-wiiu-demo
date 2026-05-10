@@ -4,8 +4,158 @@
 #include "render_utils.h"
 #include "storage_demo.h"
 
+#include <cstdarg>
+
 namespace
 {
+
+void SetPlatformLine(char *dst, size_t dst_size, const char *fmt, ...)
+{
+    va_list ap;
+
+    if (!dst || dst_size == 0 || !fmt) {
+        return;
+    }
+
+    va_start(ap, fmt);
+    SDL_vsnprintf(dst, dst_size, fmt, ap);
+    va_end(ap);
+}
+
+void ResetPlatformUiDemoState(AppState *state)
+{
+    if (!state) {
+        return;
+    }
+
+    SDL_zero(state->platform_ui);
+    state->platform_ui.screen_keyboard_supported = SDL_HasScreenKeyboardSupport();
+    SetPlatformLine(state->platform_ui.keyboard_status, sizeof(state->platform_ui.keyboard_status),
+                    "kbd %s  F1 / L",
+                    state->platform_ui.screen_keyboard_supported ? "ready" : "n/a");
+    SetPlatformLine(state->platform_ui.last_text, sizeof(state->platform_ui.last_text), "txt --");
+    SetPlatformLine(state->platform_ui.message_box_status, sizeof(state->platform_ui.message_box_status), "msg F2 / R");
+    SetPlatformLine(state->platform_ui.url_status, sizeof(state->platform_ui.url_status), "url F3 / START");
+}
+
+void TriggerSoftwareKeyboardDemo(AppState *state)
+{
+    SDL_PropertiesID props;
+
+    if (!state || !state->window) {
+        return;
+    }
+
+    state->platform_ui.screen_keyboard_supported = SDL_HasScreenKeyboardSupport();
+    if (!state->platform_ui.screen_keyboard_supported) {
+        SetPlatformLine(state->platform_ui.keyboard_status, sizeof(state->platform_ui.keyboard_status), "kbd unsupported");
+        return;
+    }
+
+    props = SDL_CreateProperties();
+    if (!props) {
+        SetPlatformLine(state->platform_ui.keyboard_status, sizeof(state->platform_ui.keyboard_status),
+                        "kbd props err: %s", SDL_GetError());
+        return;
+    }
+
+    (void)SDL_SetStringProperty(props, SDL_PROP_TEXTINPUT_TITLE_STRING, "Wii U software keyboard");
+    (void)SDL_SetStringProperty(props, SDL_PROP_TEXTINPUT_PLACEHOLDER_STRING, "Type with nn::swkbd");
+    (void)SDL_SetStringProperty(props, SDL_PROP_TEXTINPUT_DEFAULT_TEXT_STRING,
+                                state->platform_ui.entered_text[0] ? state->platform_ui.entered_text : "Cafe SDL");
+    (void)SDL_SetNumberProperty(props, SDL_PROP_TEXTINPUT_MAX_LENGTH_NUMBER, 64);
+    (void)SDL_SetBooleanProperty(props, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, true);
+
+    state->platform_ui.awaiting_virtual_text = true;
+    SetPlatformLine(state->platform_ui.keyboard_status, sizeof(state->platform_ui.keyboard_status), "kbd open...");
+    if (!SDL_StartTextInputWithProperties(state->window, props)) {
+        state->platform_ui.awaiting_virtual_text = false;
+        SetPlatformLine(state->platform_ui.keyboard_status, sizeof(state->platform_ui.keyboard_status),
+                        "kbd err: %s", SDL_GetError());
+    } else {
+        (void)SDL_StopTextInput(state->window);
+    }
+
+    SDL_DestroyProperties(props);
+}
+
+void TriggerOpenUrlDemo(AppState *state)
+{
+    if (!state) {
+        return;
+    }
+
+    if (!SDL_OpenURL("https://libsdl.org/")) {
+        SetPlatformLine(state->platform_ui.url_status, sizeof(state->platform_ui.url_status),
+                        "url err: %s", SDL_GetError());
+        return;
+    }
+
+    SetPlatformLine(state->platform_ui.url_status, sizeof(state->platform_ui.url_status), "url launched libsdl.org");
+}
+
+void TriggerMessageBoxDemo(AppState *state)
+{
+    const SDL_MessageBoxButtonData buttons[] = {
+        { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Stay Here" },
+        { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 2, "Open URL" },
+    };
+    const SDL_MessageBoxData message_box = {
+        SDL_MESSAGEBOX_INFORMATION,
+        state ? state->window : nullptr,
+        "Wii U message box",
+        "Native nn::erreula dialog through SDL",
+        (int)SDL_arraysize(buttons),
+        buttons,
+        nullptr
+    };
+    int button_id = 0;
+
+    if (!state) {
+        return;
+    }
+
+    if (!SDL_ShowMessageBox(&message_box, &button_id)) {
+        SetPlatformLine(state->platform_ui.message_box_status, sizeof(state->platform_ui.message_box_status),
+                        "msg err: %s", SDL_GetError());
+        return;
+    }
+
+    if (button_id == 2) {
+        SetPlatformLine(state->platform_ui.message_box_status, sizeof(state->platform_ui.message_box_status), "msg chose url");
+        TriggerOpenUrlDemo(state);
+    } else {
+        SetPlatformLine(state->platform_ui.message_box_status, sizeof(state->platform_ui.message_box_status), "msg chose stay");
+    }
+}
+
+bool RenderPlatformUiWidget(AppState *state, const SDL_FRect &rect)
+{
+    const PlatformTextUiDemoState &platform_ui = state->platform_ui;
+    const float text_x = rect.x + 10.0f;
+    const float text_y = rect.y + 9.0f;
+    const float line_height = 11.0f;
+    const Uint8 accent_r = platform_ui.screen_keyboard_supported ? 255 : 180;
+    const Uint8 accent_g = platform_ui.screen_keyboard_supported ? 180 : 90;
+    const Uint8 accent_b = 96;
+    const SDL_FRect accent_strip = { rect.x + 1.0f, rect.y + 1.0f, rect.w - 2.0f, 4.0f };
+
+    if (!SetColor(state->renderer, 8, 12, 28, 228) ||
+        !SDL_RenderFillRect(state->renderer, &rect) ||
+        !SetColor(state->renderer, accent_r, accent_g, accent_b, 255) ||
+        !SDL_RenderRect(state->renderer, &rect) ||
+        !SDL_RenderFillRect(state->renderer, &accent_strip) ||
+        !SetColor(state->renderer, 232, 240, 255, 255) ||
+        !SDL_RenderDebugText(state->renderer, text_x, text_y, "platform ui") ||
+        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height, platform_ui.keyboard_status) ||
+        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 2.0f, platform_ui.last_text) ||
+        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 3.0f, platform_ui.message_box_status) ||
+        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 4.0f, platform_ui.url_status)) {
+        return false;
+    }
+
+    return true;
+}
 
 void ResetSensorSnapshot(SensorSnapshot *sensor)
 {
@@ -807,6 +957,7 @@ void ResetInputDemoState(AppState *state)
     ResetActiveGamepadState(state);
     ResetActiveJoystickState(state);
     ResetRumblePreview(&state->rumble);
+    ResetPlatformUiDemoState(state);
 }
 
 void OpenInitialInputDevices(AppState *state)
@@ -870,6 +1021,20 @@ bool HandleInputDemoEvent(AppState *state, const SDL_Event *event)
             TriggerGamepadRumble(state, gamepad, 0x5000, 0x9000, 140);
             return true;
         }
+        if (gamepad && state->active_gamepad_id == event->gbutton.which) {
+            if (event->gbutton.button == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER) {
+                TriggerSoftwareKeyboardDemo(state);
+                return true;
+            }
+            if (event->gbutton.button == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER) {
+                TriggerMessageBoxDemo(state);
+                return true;
+            }
+            if (event->gbutton.button == SDL_GAMEPAD_BUTTON_START) {
+                TriggerOpenUrlDemo(state);
+                return true;
+            }
+        }
     }
 
     if (event->type == SDL_EVENT_JOYSTICK_BUTTON_DOWN && !SDL_IsGamepad(event->jbutton.which)) {
@@ -879,6 +1044,42 @@ bool HandleInputDemoEvent(AppState *state, const SDL_Event *event)
             TriggerJoystickRumble(state, joystick, 0x7000, 0x5000, 180);
             return true;
         }
+    }
+
+    if (event->type == SDL_EVENT_KEY_DOWN) {
+        if (event->key.scancode == SDL_SCANCODE_F1) {
+            TriggerSoftwareKeyboardDemo(state);
+            return true;
+        }
+        if (event->key.scancode == SDL_SCANCODE_F2) {
+            TriggerMessageBoxDemo(state);
+            return true;
+        }
+        if (event->key.scancode == SDL_SCANCODE_F3) {
+            TriggerOpenUrlDemo(state);
+            return true;
+        }
+    }
+
+    if (event->type == SDL_EVENT_TEXT_INPUT && state->platform_ui.awaiting_virtual_text) {
+        state->platform_ui.awaiting_virtual_text = false;
+        SDL_strlcpy(state->platform_ui.entered_text, event->text.text, sizeof(state->platform_ui.entered_text));
+        SetPlatformLine(state->platform_ui.keyboard_status, sizeof(state->platform_ui.keyboard_status), "kbd text committed");
+        SetPlatformLine(state->platform_ui.last_text, sizeof(state->platform_ui.last_text), "txt %s", state->platform_ui.entered_text);
+        return true;
+    }
+
+    if (event->type == SDL_EVENT_SCREEN_KEYBOARD_SHOWN) {
+        SetPlatformLine(state->platform_ui.keyboard_status, sizeof(state->platform_ui.keyboard_status), "kbd visible");
+        return true;
+    }
+
+    if (event->type == SDL_EVENT_SCREEN_KEYBOARD_HIDDEN) {
+        if (state->platform_ui.awaiting_virtual_text) {
+            state->platform_ui.awaiting_virtual_text = false;
+            SetPlatformLine(state->platform_ui.keyboard_status, sizeof(state->platform_ui.keyboard_status), "kbd closed");
+        }
+        return true;
     }
 
     return false;
@@ -980,6 +1181,10 @@ bool RenderInputOverlay(AppState *state, int width, int height)
     const SDL_FRect audio_rect = { panel_x, rumble_rect.y + rumble_rect.h + 16.0f, panel_w, audio_h };
     const SDL_FRect touch_rect = { touch_x, touch_y, touch_w, touch_h };
     const SDL_FRect sensor_rect = { touch_x, sensor_y, touch_w, sensor_h };
+    const float platform_h = (sensor_h >= 136.0f) ? 78.0f : 0.0f;
+    const float platform_gap = (platform_h > 0.0f) ? 8.0f : 0.0f;
+    const SDL_FRect platform_rect = { touch_x, sensor_y, touch_w, platform_h };
+    const SDL_FRect sensor_body_rect = { touch_x, sensor_y + platform_h + platform_gap, touch_w, SDL_max(0.0f, sensor_h - platform_h - platform_gap) };
     const bool has_gamepad = active_gamepad && SDL_GamepadConnected(active_gamepad);
     const float left_x = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFTX)) : 0.0f;
     const float left_y = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFTY)) : 0.0f;
@@ -1196,14 +1401,18 @@ bool RenderInputOverlay(AppState *state, int width, int height)
         }
     }
 
-    if (sensor_rect.h >= 90.0f) {
+    if (platform_h > 0.0f && !RenderPlatformUiWidget(state, platform_rect)) {
+        return false;
+    }
+
+    if (sensor_body_rect.h >= 90.0f) {
         const float widget_gap = 8.0f;
         const float widget_padding = 10.0f;
-        const float widget_h = (sensor_rect.h - widget_padding * 2.0f - widget_gap * 2.0f) / 3.0f;
-        const float widget_y = sensor_rect.y + widget_padding;
-        const SDL_FRect accel_rect = { sensor_rect.x, widget_y, sensor_rect.w, widget_h };
-        const SDL_FRect gyro_rect = { sensor_rect.x, widget_y + widget_h + widget_gap, sensor_rect.w, widget_h };
-        const SDL_FRect accel_l_rect = { sensor_rect.x, widget_y + (widget_h + widget_gap) * 2.0f, sensor_rect.w, widget_h };
+        const float widget_h = (sensor_body_rect.h - widget_padding * 2.0f - widget_gap * 2.0f) / 3.0f;
+        const float widget_y = sensor_body_rect.y + widget_padding;
+        const SDL_FRect accel_rect = { sensor_body_rect.x, widget_y, sensor_body_rect.w, widget_h };
+        const SDL_FRect gyro_rect = { sensor_body_rect.x, widget_y + widget_h + widget_gap, sensor_body_rect.w, widget_h };
+        const SDL_FRect accel_l_rect = { sensor_body_rect.x, widget_y + (widget_h + widget_gap) * 2.0f, sensor_body_rect.w, widget_h };
 
         if (!RenderSensorWidget(state, accel_rect, state->accel_sensor, SDL_STANDARD_GRAVITY * 2.0f, 255, 170, 90) ||
             !RenderSensorWidget(state, gyro_rect, state->gyro_sensor, 4.0f, 90, 220, 255) ||
