@@ -4,7 +4,12 @@ project(sdl-demo CXX)
 find_package(SDL3 REQUIRED CONFIG)
 
 add_executable(sdl-demo
-   main.cpp)
+   main.cpp
+   audio_demo.cpp
+   input_demo.cpp
+   render_utils.cpp
+   scene_demo.cpp
+   storage_demo.cpp)
 
 target_compile_features(sdl-demo PRIVATE cxx_std_17)
 target_link_libraries(sdl-demo PRIVATE SDL3::SDL3)
