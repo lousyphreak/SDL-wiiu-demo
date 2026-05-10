@@ -105,6 +105,20 @@ struct TimeDemoState
     bool roundtrip_ready;
 };
 
+struct CameraDemoState
+{
+    SDL_Camera *camera;
+    SDL_CameraID device_id;
+    SDL_Texture *preview_texture;
+    SDL_CameraSpec spec;
+    Uint64 last_frame_timestamp_ns;
+    SDL_CameraPermissionState permission;
+    bool available;
+    bool enabled;
+    bool frame_ready;
+    char status_text[96];
+};
+
 struct AppState
 {
     SDL_Window *window;
@@ -131,4 +145,5 @@ struct AppState
     AudioDemoState audio;
     StorageDemoState storage;
     TimeDemoState time_demo;
+    CameraDemoState camera_demo;
 };

@@ -6,6 +6,7 @@ find_package(SDL3 REQUIRED CONFIG)
 add_executable(sdl-demo
    main.cpp
    audio_demo.cpp
+   camera_demo.cpp
    input_demo.cpp
    render_utils.cpp
    scene_demo.cpp

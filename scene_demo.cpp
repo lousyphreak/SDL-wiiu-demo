@@ -2,6 +2,7 @@
 
 #include <cmath>
 
+#include "camera_demo.h"
 #include "input_demo.h"
 #include "render_utils.h"
 
@@ -504,6 +505,11 @@ bool RenderFrame(AppState *state)
     if (!RenderRendererShowcase(state, width, height, time, horizon, left_x, left_y,
                                 right_x, right_y, left_trigger, right_trigger)) {
         SDL_Log("Failed to render renderer showcase: %s", SDL_GetError());
+        return false;
+    }
+
+    if (!RenderCameraDemo(state, width, height, horizon)) {
+        SDL_Log("Failed to render camera showcase: %s", SDL_GetError());
         return false;
     }
 
