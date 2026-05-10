@@ -1,0 +1,2 @@
+Wii U title storage is live.
+This file is packaged in /vol/content/ and loaded through SDL_OpenTitleStorage().

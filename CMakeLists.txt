@@ -13,3 +13,6 @@ wut_create_rpx(sdl-demo)
 
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/sdl-demo.rpx"
         DESTINATION "${CMAKE_INSTALL_PREFIX}")
+
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/content/"
+        DESTINATION "${CMAKE_INSTALL_PREFIX}/content")
