@@ -81,6 +81,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 
     SDL_Log("[startup] InitTimeDemo begin");
     if (!InitTimeDemo(state)) {
+        ShutdownStorageDemo(state);
         ShutdownTimeDemo(state);
         ShutdownAudioDemo(state);
         SDL_DestroyRenderer(state->renderer);
@@ -92,6 +93,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
 
     SDL_Log("[startup] InitCameraDemo begin");
     if (!InitCameraDemo(state)) {
+        ShutdownStorageDemo(state);
         ShutdownTimeDemo(state);
         ShutdownAudioDemo(state);
         SDL_DestroyRenderer(state->renderer);
@@ -178,6 +180,7 @@ SDL_AppResult SDL_AppIterate(void *appstate)
     PollInputDemo(state);
     UpdateAudioDemo(state);
     UpdateCameraDemo(state);
+    UpdateStorageDemo(state);
     UpdateTimeDemo(state);
     return RenderFrame(state) ? SDL_APP_CONTINUE : SDL_APP_FAILURE;
 }
@@ -191,6 +194,7 @@ void SDL_AppQuit(void *appstate, SDL_AppResult result)
         ShutdownInputDemo(state);
         ShutdownCameraDemo(state);
         ShutdownTimeDemo(state);
+        ShutdownStorageDemo(state);
         ShutdownAudioDemo(state);
         DestroySceneResources(state);
         if (state->renderer) {

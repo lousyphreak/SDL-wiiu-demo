@@ -4,5 +4,7 @@
 
 void ResetStorageDemoState(StorageDemoState *storage);
 bool InitStorageDemo(AppState *state);
+void UpdateStorageDemo(AppState *state);
+void ShutdownStorageDemo(AppState *state);
 bool PersistStorageCounter(StorageDemoState *storage, Uint32 new_count);
 bool RenderStorageWidget(AppState *state, const SDL_FRect &rect);

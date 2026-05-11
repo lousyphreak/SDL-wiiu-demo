@@ -10,6 +10,18 @@ static constexpr const char *kSaveDir = "showcase";
 static constexpr const char *kSaveFile = "showcase/save-count.txt";
 static constexpr const char *kDirectIOFile = "showcase/direct-io.txt";
 static constexpr const char *kDirectIOPayload = "SDL Wii U native file IO OK\n";
+static constexpr const char *kAsyncIOFile = "showcase/async-io.txt";
+static constexpr const char *kAsyncIOPayload = "SDL Wii U async IO OK\n";
+
+enum AsyncProbeToken
+{
+    ASYNC_PROBE_TITLE_READ = 1,
+    ASYNC_PROBE_TITLE_CLOSE,
+    ASYNC_PROBE_SAVE_WRITE,
+    ASYNC_PROBE_SAVE_CLOSE,
+    ASYNC_PROBE_VERIFY_READ,
+    ASYNC_PROBE_VERIFY_CLOSE
+};
 
 void CopyStorageDisplayString(char *destination, size_t destination_size, const char *source)
 {
@@ -73,21 +85,292 @@ Uint32 HashStorageBytes(const Uint8 *bytes, size_t length)
 void LogStorageSnapshot(const char *phase, const StorageDemoState *storage)
 {
     if (storage && storage->space_remaining_known) {
-        SDL_Log("[storage] %s title=%s user=%s count=%u free=%.1fMB raw=%s",
+        SDL_Log("[storage] %s title=%s user=%s count=%u free=%.1fMB raw=%s aio=%s",
                 phase ? phase : "snapshot",
                 storage->title_ready ? "ok" : "miss",
                 storage->user_ready ? (storage->last_save_ok ? "flushed" : "open") : "fail",
                 (unsigned int)storage->save_count,
                 (double)storage->space_remaining / (1024.0 * 1024.0),
-                storage->raw_io_status[0] ? storage->raw_io_status : "---");
+                storage->raw_io_status[0] ? storage->raw_io_status : "---",
+                storage->async_status[0] ? storage->async_status : "---");
     } else {
-        SDL_Log("[storage] %s title=%s user=%s count=%u free=--- raw=%s",
+        SDL_Log("[storage] %s title=%s user=%s count=%u free=--- raw=%s aio=%s",
                 phase ? phase : "snapshot",
                 (storage && storage->title_ready) ? "ok" : "miss",
                 (storage && storage->user_ready) ? ((storage->last_save_ok) ? "flushed" : "open") : "fail",
                 storage ? (unsigned int)storage->save_count : 0,
-                (storage && storage->raw_io_status[0]) ? storage->raw_io_status : "---");
+                (storage && storage->raw_io_status[0]) ? storage->raw_io_status : "---",
+                (storage && storage->async_status[0]) ? storage->async_status : "---");
     }
+}
+
+void SetAsyncProbeStatus(StorageDemoState *storage, const char *status)
+{
+    if (!storage) {
+        return;
+    }
+
+    CopyStorageDisplayString(storage->async_status, sizeof(storage->async_status), status);
+}
+
+void SetAsyncProbeError(StorageDemoState *storage, const char *status)
+{
+    if (!storage) {
+        return;
+    }
+
+    CopyStorageErrorString(storage->async_error, sizeof(storage->async_error));
+    if (status && *status) {
+        SDL_snprintf(storage->async_status, sizeof(storage->async_status), "%s", status);
+    } else {
+        SDL_strlcpy(storage->async_status, "aio failure", sizeof(storage->async_status));
+    }
+}
+
+void LogAsyncProbeOutcome(const char *label, const SDL_AsyncIOOutcome *outcome)
+{
+    SDL_Log("[storage][aio] %s result=%d bytes=%llu/%llu",
+            label ? label : "task",
+            outcome ? (int)outcome->result : -1,
+            outcome ? (unsigned long long)outcome->bytes_transferred : 0,
+            outcome ? (unsigned long long)outcome->bytes_requested : 0);
+}
+
+bool QueueAsyncClose(StorageDemoState *storage, SDL_AsyncIO *asyncio, bool flush, AsyncProbeToken token, const char *label)
+{
+    if (!storage || !storage->async_queue || !asyncio) {
+        return false;
+    }
+
+    if (!SDL_CloseAsyncIO(asyncio, flush, storage->async_queue, reinterpret_cast<void *>(static_cast<uintptr_t>(token)))) {
+        SetAsyncProbeError(storage, label);
+        SDL_Log("[storage][aio] close queue failed (%s): %s", label ? label : "close", storage->async_error);
+        return false;
+    }
+
+    return true;
+}
+
+bool StartAsyncTitleProbe(StorageDemoState *storage)
+{
+    const char *base_path = nullptr;
+    char *title_path = nullptr;
+    Uint8 *expected_bytes = nullptr;
+    SDL_AsyncIO *asyncio = nullptr;
+    size_t expected_size = 0;
+    bool ok = false;
+
+    if (!storage || !storage->async_queue) {
+        return false;
+    }
+
+    base_path = SDL_GetBasePath();
+    if (!base_path || SDL_asprintf(&title_path, "%s%s", base_path, kTitleFile) < 0) {
+        SetAsyncProbeError(storage, "aio title path fail");
+        goto done;
+    }
+
+    expected_bytes = static_cast<Uint8 *>(SDL_LoadFile(title_path, &expected_size));
+    if (!expected_bytes || expected_size == 0) {
+        SetAsyncProbeError(storage, "aio title prep fail");
+        goto done;
+    }
+
+    storage->async_title_expected_size = SDL_min((Uint64)expected_size, (Uint64)(sizeof(storage->async_title_buffer) - 1));
+    storage->async_title_hash = HashStorageBytes(expected_bytes, (size_t)storage->async_title_expected_size);
+    SDL_zeroa(storage->async_title_buffer);
+
+    asyncio = SDL_AsyncIOFromFile(title_path, "r");
+    if (!asyncio) {
+        SetAsyncProbeError(storage, "aio title open fail");
+        goto done;
+    }
+
+    if (!SDL_ReadAsyncIO(asyncio,
+                         storage->async_title_buffer,
+                         0,
+                         storage->async_title_expected_size,
+                         storage->async_queue,
+                         reinterpret_cast<void *>(static_cast<uintptr_t>(ASYNC_PROBE_TITLE_READ)))) {
+        SetAsyncProbeError(storage, "aio title queue fail");
+        (void)QueueAsyncClose(storage, asyncio, false, ASYNC_PROBE_TITLE_CLOSE, "aio title close fail");
+        goto done;
+    }
+
+    if (!QueueAsyncClose(storage, asyncio, false, ASYNC_PROBE_TITLE_CLOSE, "aio title close fail")) {
+        goto done;
+    }
+
+    SDL_Log("[storage][aio] title probe queued: %s (%llu bytes)",
+            title_path,
+            (unsigned long long)storage->async_title_expected_size);
+    ok = true;
+
+done:
+    SDL_free(expected_bytes);
+    SDL_free(title_path);
+    return ok;
+}
+
+bool StartAsyncVerifyProbe(StorageDemoState *storage)
+{
+    char *pref_path = nullptr;
+    char *save_path = nullptr;
+    SDL_AsyncIO *asyncio = nullptr;
+    const Uint64 payload_size = SDL_strlen(kAsyncIOPayload);
+    bool ok = false;
+
+    if (!storage || !storage->async_queue) {
+        return false;
+    }
+
+    pref_path = SDL_GetPrefPath("wiiu", "sdl-demo");
+    if (!pref_path || SDL_asprintf(&save_path, "%s%s", pref_path, kAsyncIOFile) < 0) {
+        SetAsyncProbeError(storage, "aio verify path fail");
+        goto done;
+    }
+
+    storage->async_verify_expected_size = payload_size;
+    SDL_zeroa(storage->async_verify_buffer);
+    asyncio = SDL_AsyncIOFromFile(save_path, "r");
+    if (!asyncio) {
+        SetAsyncProbeError(storage, "aio verify open fail");
+        goto done;
+    }
+
+    if (!SDL_ReadAsyncIO(asyncio,
+                         storage->async_verify_buffer,
+                         0,
+                         payload_size,
+                         storage->async_queue,
+                         reinterpret_cast<void *>(static_cast<uintptr_t>(ASYNC_PROBE_VERIFY_READ)))) {
+        SetAsyncProbeError(storage, "aio verify queue fail");
+        (void)QueueAsyncClose(storage, asyncio, false, ASYNC_PROBE_VERIFY_CLOSE, "aio verify close fail");
+        goto done;
+    }
+
+    if (!QueueAsyncClose(storage, asyncio, false, ASYNC_PROBE_VERIFY_CLOSE, "aio verify close fail")) {
+        goto done;
+    }
+
+    SDL_Log("[storage][aio] verify probe queued: %s (%llu bytes)",
+            save_path,
+            (unsigned long long)payload_size);
+    ok = true;
+
+done:
+    SDL_free(save_path);
+    SDL_free(pref_path);
+    return ok;
+}
+
+bool StartAsyncSaveProbe(StorageDemoState *storage)
+{
+    char *pref_path = nullptr;
+    char *save_dir = nullptr;
+    char *save_path = nullptr;
+    SDL_AsyncIO *asyncio = nullptr;
+    const Uint64 payload_size = SDL_strlen(kAsyncIOPayload);
+    bool ok = false;
+
+    if (!storage || !storage->async_queue) {
+        return false;
+    }
+
+    pref_path = SDL_GetPrefPath("wiiu", "sdl-demo");
+    if (!pref_path) {
+        SetAsyncProbeError(storage, "aio save pref fail");
+        goto done;
+    }
+
+    if (SDL_asprintf(&save_dir, "%s%s/", pref_path, kSaveDir) < 0 || !SDL_CreateDirectory(save_dir)) {
+        SetAsyncProbeError(storage, "aio save dir fail");
+        goto done;
+    }
+
+    if (SDL_asprintf(&save_path, "%s%s", pref_path, kAsyncIOFile) < 0) {
+        SetAsyncProbeError(storage, "aio save path fail");
+        goto done;
+    }
+
+    asyncio = SDL_AsyncIOFromFile(save_path, "w+");
+    if (!asyncio) {
+        SetAsyncProbeError(storage, "aio save open fail");
+        goto done;
+    }
+
+    if (!SDL_WriteAsyncIO(asyncio,
+                          const_cast<char *>(kAsyncIOPayload),
+                          0,
+                          payload_size,
+                          storage->async_queue,
+                          reinterpret_cast<void *>(static_cast<uintptr_t>(ASYNC_PROBE_SAVE_WRITE)))) {
+        SetAsyncProbeError(storage, "aio save queue fail");
+        (void)QueueAsyncClose(storage, asyncio, false, ASYNC_PROBE_SAVE_CLOSE, "aio save close fail");
+        goto done;
+    }
+
+    if (!QueueAsyncClose(storage, asyncio, true, ASYNC_PROBE_SAVE_CLOSE, "aio save close fail")) {
+        goto done;
+    }
+
+    SDL_Log("[storage][aio] save probe queued: %s (%llu bytes)",
+            save_path,
+            (unsigned long long)payload_size);
+    ok = true;
+
+done:
+    SDL_free(save_path);
+    SDL_free(save_dir);
+    SDL_free(pref_path);
+    return ok;
+}
+
+void BeginAsyncProbe(StorageDemoState *storage)
+{
+    bool title_ok;
+    bool save_ok;
+
+    if (!storage) {
+        return;
+    }
+
+    storage->async_status[0] = '\0';
+    storage->async_error[0] = '\0';
+    storage->async_started = false;
+    storage->async_complete = false;
+    storage->async_title_ok = false;
+    storage->async_title_close_ok = false;
+    storage->async_write_ok = false;
+    storage->async_write_close_ok = false;
+    storage->async_verify_ok = false;
+    storage->async_verify_close_ok = false;
+    storage->async_title_bytes = 0;
+    storage->async_write_bytes = 0;
+    storage->async_verify_bytes = 0;
+    storage->async_title_expected_size = 0;
+    storage->async_verify_expected_size = 0;
+
+    storage->async_queue = SDL_CreateAsyncIOQueue();
+    if (!storage->async_queue) {
+        SetAsyncProbeError(storage, "aio queue fail");
+        SDL_Log("[storage][aio] queue creation failed: %s", storage->async_error);
+        return;
+    }
+
+    title_ok = StartAsyncTitleProbe(storage);
+    save_ok = StartAsyncSaveProbe(storage);
+    storage->async_started = title_ok || save_ok;
+
+    if (!storage->async_started) {
+        if (!storage->async_status[0]) {
+            SetAsyncProbeStatus(storage, "aio unavailable");
+        }
+        storage->async_complete = true;
+        return;
+    }
+
+    SetAsyncProbeStatus(storage, "aio title/save pending");
 }
 
 bool QueryStorageSpaceRemaining(SDL_Storage *storage, Uint64 *remaining)
@@ -297,6 +580,115 @@ void ResetStorageDemoState(StorageDemoState *storage)
     SDL_zero(*storage);
 }
 
+void UpdateStorageDemo(AppState *state)
+{
+    StorageDemoState *storage;
+    SDL_AsyncIOOutcome outcome;
+
+    if (!state) {
+        return;
+    }
+
+    storage = &state->storage;
+    if (!storage->async_queue || storage->async_complete) {
+        return;
+    }
+
+    while (SDL_GetAsyncIOResult(storage->async_queue, &outcome)) {
+        const AsyncProbeToken token = static_cast<AsyncProbeToken>(reinterpret_cast<uintptr_t>(outcome.userdata));
+
+        switch (token) {
+        case ASYNC_PROBE_TITLE_READ:
+            LogAsyncProbeOutcome("title-read", &outcome);
+            storage->async_title_bytes = outcome.bytes_transferred;
+            if (outcome.result == SDL_ASYNCIO_COMPLETE &&
+                outcome.bytes_transferred == storage->async_title_expected_size &&
+                HashStorageBytes(reinterpret_cast<const Uint8 *>(storage->async_title_buffer), (size_t)outcome.bytes_transferred) == storage->async_title_hash) {
+                storage->async_title_ok = true;
+            } else {
+                SetAsyncProbeStatus(storage, "aio title mismatch");
+            }
+            break;
+
+        case ASYNC_PROBE_TITLE_CLOSE:
+            LogAsyncProbeOutcome("title-close", &outcome);
+            storage->async_title_close_ok = (outcome.result == SDL_ASYNCIO_COMPLETE);
+            break;
+
+        case ASYNC_PROBE_SAVE_WRITE:
+            LogAsyncProbeOutcome("save-write", &outcome);
+            storage->async_write_bytes = outcome.bytes_transferred;
+            if (outcome.result == SDL_ASYNCIO_COMPLETE &&
+                outcome.bytes_transferred == SDL_strlen(kAsyncIOPayload)) {
+                storage->async_write_ok = true;
+            } else {
+                SetAsyncProbeStatus(storage, "aio write fail");
+            }
+            break;
+
+        case ASYNC_PROBE_SAVE_CLOSE:
+            LogAsyncProbeOutcome("save-close", &outcome);
+            storage->async_write_close_ok = (outcome.result == SDL_ASYNCIO_COMPLETE);
+            if (storage->async_write_ok && storage->async_write_close_ok) {
+                (void)StartAsyncVerifyProbe(storage);
+            }
+            break;
+
+        case ASYNC_PROBE_VERIFY_READ:
+            LogAsyncProbeOutcome("verify-read", &outcome);
+            storage->async_verify_bytes = outcome.bytes_transferred;
+            if (outcome.result == SDL_ASYNCIO_COMPLETE &&
+                outcome.bytes_transferred == storage->async_verify_expected_size &&
+                SDL_memcmp(storage->async_verify_buffer, kAsyncIOPayload, (size_t)outcome.bytes_transferred) == 0) {
+                storage->async_verify_ok = true;
+            } else {
+                SetAsyncProbeStatus(storage, "aio verify fail");
+            }
+            break;
+
+        case ASYNC_PROBE_VERIFY_CLOSE:
+            LogAsyncProbeOutcome("verify-close", &outcome);
+            storage->async_verify_close_ok = (outcome.result == SDL_ASYNCIO_COMPLETE);
+            break;
+
+        default:
+            SDL_Log("[storage][aio] unexpected token=%u", (unsigned int)token);
+            break;
+        }
+    }
+
+    if (!storage->async_complete &&
+        storage->async_title_ok &&
+        storage->async_title_close_ok &&
+        storage->async_write_ok &&
+        storage->async_write_close_ok &&
+        storage->async_verify_ok &&
+        storage->async_verify_close_ok) {
+        storage->async_complete = true;
+        SDL_snprintf(storage->async_status, sizeof(storage->async_status),
+                     "aio ok t%llu w%llu v%llu",
+                     (unsigned long long)storage->async_title_bytes,
+                     (unsigned long long)storage->async_write_bytes,
+                     (unsigned long long)storage->async_verify_bytes);
+        storage->async_error[0] = '\0';
+        SDL_Log("[storage][aio] probe complete: %s", storage->async_status);
+    } else if (!storage->async_complete && !storage->async_status[0]) {
+        SetAsyncProbeStatus(storage, "aio pending");
+    }
+}
+
+void ShutdownStorageDemo(AppState *state)
+{
+    if (!state) {
+        return;
+    }
+
+    if (state->storage.async_queue) {
+        SDL_DestroyAsyncIOQueue(state->storage.async_queue);
+        state->storage.async_queue = nullptr;
+    }
+}
+
 bool PersistStorageCounter(StorageDemoState *storage, Uint32 new_count)
 {
     SDL_Storage *user_storage;
@@ -464,6 +856,10 @@ bool InitStorageDemo(AppState *state)
         SDL_Log("[storage] init raw-probe done");
     }
 
+    SDL_Log("[storage] init aio begin");
+    BeginAsyncProbe(storage);
+    SDL_Log("[storage] init aio done: %s", storage->async_status[0] ? storage->async_status : "pending");
+
     LogStorageSnapshot("init", storage);
 
     return true;
@@ -490,6 +886,8 @@ bool RenderStorageWidget(AppState *state, const SDL_FRect &rect)
     char pref_value[36];
     char cwd_line[40];
     char pref_line[52];
+    char async_value[44];
+    char async_line[50];
 
     if (!storage->render_logged) {
         SDL_Log("[storage] render-window rect=(%.0f,%.0f %.0fx%.0f)",
@@ -525,6 +923,14 @@ bool RenderStorageWidget(AppState *state, const SDL_FRect &rect)
         CopyStorageDisplayString(pref_value, sizeof(pref_value),
                                  storage->pref_error[0] ? storage->pref_error : "unavailable");
         SDL_snprintf(pref_line, sizeof(pref_line), "pref! %s", pref_value);
+    }
+    if (storage->async_error[0]) {
+        CopyStorageDisplayString(async_value, sizeof(async_value), storage->async_error);
+        SDL_snprintf(async_line, sizeof(async_line), "aio! %s", async_value);
+    } else {
+        CopyStorageDisplayString(async_value, sizeof(async_value),
+                                 storage->async_status[0] ? storage->async_status : "aio unavailable");
+        SDL_snprintf(async_line, sizeof(async_line), "aio %s", async_value);
     }
 
     if (!SetColor(state->renderer, 8, 12, 28, 228) ||
@@ -583,10 +989,11 @@ bool RenderStorageWidget(AppState *state, const SDL_FRect &rect)
                                    (unsigned int)storage->save_count) ||
         !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 2.0f,
                              preview_line) ||
-        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 3.0f, space_line) ||
-        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 4.0f, status_line) ||
-        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 5.0f, cwd_line) ||
-        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 6.0f, pref_line)) {
+         !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 3.0f, space_line) ||
+         !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 4.0f, status_line) ||
+         !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 5.0f, cwd_line) ||
+         !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 6.0f, pref_line) ||
+         !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 7.0f, async_line)) {
         return false;
     }
 
