@@ -166,6 +166,9 @@ struct AppState
 {
     SDL_Window *window;
     SDL_Renderer *renderer;
+    SDL_Window *drc_window;
+    SDL_Renderer *drc_renderer;
+    SDL_WindowID drc_window_id;
     SDL_Texture *background;
     SDL_Texture *showcase_texture;
     int background_width;

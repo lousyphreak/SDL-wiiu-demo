@@ -360,6 +360,93 @@ bool RenderRendererShowcase(AppState *state, int width, int height, double time,
     return true;
 }
 
+bool RenderDrcScene(SDL_Renderer *renderer)
+{
+    const double time = (double)SDL_GetTicks() / 1000.0;
+    SDL_FRect stripes[8];
+    SDL_FPoint wave[48];
+    int width = 0;
+    int height = 0;
+
+    if (!renderer) {
+        return false;
+    }
+
+    if (!SDL_GetRenderOutputSize(renderer, &width, &height)) {
+        SDL_Log("SDL_GetRenderOutputSize(DRC) failed: %s", SDL_GetError());
+        return false;
+    }
+
+    for (int i = 0; i < SDL_arraysize(stripes); ++i) {
+        stripes[i].x = 18.0f + (float)(i * 96);
+        stripes[i].y = 36.0f + (float)((i & 1) ? 18 : 0);
+        stripes[i].w = 72.0f;
+        stripes[i].h = (float)height - 72.0f;
+    }
+
+    for (int i = 0; i < SDL_arraysize(wave); ++i) {
+        const float x = ((float)i / (float)(SDL_arraysize(wave) - 1)) * (float)width;
+        wave[i].x = x;
+        wave[i].y = (float)height * 0.72f + SDL_sinf((float)time * 2.4f + x * 0.028f) * 26.0f;
+    }
+
+    if (!SetColor(renderer, 14, 28, 22, 255) ||
+        !SDL_RenderClear(renderer) ||
+        !SetColor(renderer, 28, 88, 74, 255) ||
+        !SDL_RenderFillRects(renderer, stripes, SDL_arraysize(stripes)) ||
+        !SetColor(renderer, 170, 255, 214, 255) ||
+        !SDL_RenderLines(renderer, wave, SDL_arraysize(wave)) ||
+        !SetColor(renderer, 255, 232, 120, 255) ||
+        !FillCircle(renderer,
+                    (float)width * 0.50f + SDL_sinf((float)time * 1.7f) * (float)width * 0.16f,
+                    (float)height * 0.36f + SDL_cosf((float)time * 1.1f) * 24.0f,
+                    58.0f) ||
+        !SetColor(renderer, 255, 255, 255, 255) ||
+        !FillCircle(renderer,
+                    (float)width * 0.50f + SDL_sinf((float)time * 1.7f) * (float)width * 0.16f,
+                    (float)height * 0.36f + SDL_cosf((float)time * 1.1f) * 24.0f,
+                    18.0f)) {
+        SDL_Log("Failed to render DRC scene: %s", SDL_GetError());
+        return false;
+    }
+
+    for (int i = 0; i < 5; ++i) {
+        const float orbit = (float)time * (1.1f + i * 0.18f);
+        const SDL_FRect rect = {
+            (float)width * 0.5f + SDL_cosf(orbit + i) * (72.0f + i * 22.0f) - 18.0f,
+            (float)height * 0.5f + SDL_sinf(orbit * 1.3f + i) * (32.0f + i * 12.0f) - 18.0f,
+            36.0f + i * 6.0f,
+            20.0f + i * 4.0f
+        };
+
+        if (!SetColor(renderer,
+                      (Uint8)(96 + i * 28),
+                      (Uint8)(220 - i * 18),
+                      (Uint8)(140 + i * 12),
+                      220) ||
+            !SDL_RenderRect(renderer, &rect)) {
+            SDL_Log("Failed to render DRC orbit rect: %s", SDL_GetError());
+            return false;
+        }
+    }
+
+    if (!SetColor(renderer, 230, 245, 235, 255) ||
+        !SDL_RenderDebugText(renderer, 20.0f, 18.0f, "DRC window active") ||
+        !SDL_RenderDebugText(renderer, 20.0f, 32.0f, "left stick: toggle") ||
+        !SDL_RenderDebugText(renderer, 20.0f, 46.0f, "separate scene / renderer") ||
+        !SDL_RenderDebugText(renderer, (float)width - 76.0f, (float)height - 18.0f, "854x480")) {
+        SDL_Log("Failed to label DRC scene: %s", SDL_GetError());
+        return false;
+    }
+
+    if (!SDL_RenderPresent(renderer)) {
+        SDL_Log("SDL_RenderPresent(DRC) failed: %s", SDL_GetError());
+        return false;
+    }
+
+    return true;
+}
+
 } // namespace
 
 void DestroySceneResources(AppState *state)
@@ -533,4 +620,13 @@ bool RenderFrame(AppState *state)
     }
 
     return true;
+}
+
+bool RenderDrcFrame(AppState *state)
+{
+    if (!state || !state->drc_window || !state->drc_renderer) {
+        return true;
+    }
+
+    return RenderDrcScene(state->drc_renderer);
 }

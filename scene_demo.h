@@ -4,3 +4,4 @@
 
 void DestroySceneResources(AppState *state);
 bool RenderFrame(AppState *state);
+bool RenderDrcFrame(AppState *state);
