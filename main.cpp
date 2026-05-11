@@ -296,6 +296,10 @@ SDL_AppResult SDL_AppEvent(void *appstate, SDL_Event *event)
     if (event->type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
         SDL_Gamepad *gamepad = GetActiveGamepad(state);
         if (gamepad && state->active_gamepad_id == event->gbutton.which) {
+            if (event->gbutton.button == SDL_GAMEPAD_BUTTON_BACK) {
+                return SDL_APP_SUCCESS;
+            }
+
             if (event->gbutton.button == SDL_GAMEPAD_BUTTON_LEFT_STICK) {
                 if (!ToggleDrcWindow(state)) {
                     SDL_Log("Failed to toggle DRC demo window: %s", SDL_GetError());
