@@ -60,13 +60,16 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         return SDL_APP_FAILURE;
     }
 
+    SDL_Log("[startup] InitAudioDemo begin");
     if (!InitAudioDemo(state)) {
         SDL_DestroyRenderer(state->renderer);
         SDL_DestroyWindow(state->window);
         SDL_free(state);
         return SDL_APP_FAILURE;
     }
+    SDL_Log("[startup] InitAudioDemo done");
 
+    SDL_Log("[startup] InitStorageDemo begin");
     if (!InitStorageDemo(state)) {
         ShutdownAudioDemo(state);
         SDL_DestroyRenderer(state->renderer);
@@ -74,7 +77,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         SDL_free(state);
         return SDL_APP_FAILURE;
     }
+    SDL_Log("[startup] InitStorageDemo done");
 
+    SDL_Log("[startup] InitTimeDemo begin");
     if (!InitTimeDemo(state)) {
         ShutdownTimeDemo(state);
         ShutdownAudioDemo(state);
@@ -83,7 +88,9 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         SDL_free(state);
         return SDL_APP_FAILURE;
     }
+    SDL_Log("[startup] InitTimeDemo done");
 
+    SDL_Log("[startup] InitCameraDemo begin");
     if (!InitCameraDemo(state)) {
         ShutdownTimeDemo(state);
         ShutdownAudioDemo(state);
@@ -92,6 +99,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
         SDL_free(state);
         return SDL_APP_FAILURE;
     }
+    SDL_Log("[startup] InitCameraDemo done");
 
     OpenInitialInputDevices(state);
     SDL_Log("AppInit complete");

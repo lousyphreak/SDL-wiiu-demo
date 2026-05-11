@@ -67,14 +67,25 @@ struct StorageDemoState
     bool title_ready;
     bool user_ready;
     bool last_save_ok;
+    bool render_logged;
+    bool raw_base_ok;
+    bool raw_pref_ok;
+    bool raw_title_io_ok;
+    bool raw_save_io_ok;
+    bool space_remaining_known;
     Uint32 save_count;
+    Uint32 raw_base_entries;
+    Uint32 raw_pref_entries;
     Uint64 title_bytes;
     Uint64 space_remaining;
     Uint32 title_signature;
     Uint64 last_write_ns;
     char title_preview[64];
     char base_path[48];
+    char current_dir[48];
     char pref_path[72];
+    char pref_error[96];
+    char raw_io_status[96];
     char title_error[96];
     char user_error[96];
 };
@@ -83,6 +94,7 @@ struct TimeDemoState
 {
     SDL_TimerID timer_id;
     SDL_AtomicU32 timer_pulse_count;
+    Uint64 last_instrumentation_log_ns;
     Uint32 observed_timer_pulse_count;
     Uint64 timer_interval_ns;
     Uint64 last_timer_observation_ns;
@@ -103,6 +115,7 @@ struct TimeDemoState
     bool utc_ready;
     bool local_ready;
     bool roundtrip_ready;
+    bool render_logged;
 };
 
 struct CameraDemoState

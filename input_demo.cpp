@@ -3,6 +3,7 @@
 #include "audio_demo.h"
 #include "render_utils.h"
 #include "storage_demo.h"
+#include "time_demo.h"
 
 #include <cstdarg>
 
@@ -1168,13 +1169,22 @@ bool RenderInputOverlay(AppState *state, int width, int height)
     const float touch_y = 24.0f;
     const float sensor_y = touch_y + touch_h + 18.0f;
     const float sensor_h = SDL_max(0.0f, (float)height - sensor_y - 24.0f);
-    const float storage_w = 360.0f;
-    const float storage_h = 92.0f;
+    const float bottom_widget_w = (((float)width - 48.0f) - 12.0f) * 0.5f;
+    const float bottom_widget_h = 112.0f;
+    const float bottom_widget_gap = 12.0f;
+    const float bottom_widgets_x = 24.0f;
+    const float bottom_widgets_y = (float)height - bottom_widget_h - 18.0f;
     const SDL_FRect storage_rect = {
-        SDL_max(24.0f, ((float)width - storage_w) * 0.5f),
-        (float)height - storage_h - 18.0f,
-        storage_w,
-        storage_h
+        bottom_widgets_x,
+        bottom_widgets_y,
+        bottom_widget_w,
+        bottom_widget_h
+    };
+    const SDL_FRect time_rect = {
+        bottom_widgets_x + bottom_widget_w + bottom_widget_gap,
+        bottom_widgets_y,
+        bottom_widget_w,
+        bottom_widget_h
     };
     const SDL_FRect panel = { panel_x, panel_y, panel_w, panel_h };
     const SDL_FRect rumble_rect = { panel_x, panel_y + panel_h + 16.0f, panel_w, rumble_h };
@@ -1422,6 +1432,10 @@ bool RenderInputOverlay(AppState *state, int width, int height)
     }
 
     if (!RenderStorageWidget(state, storage_rect)) {
+        return false;
+    }
+
+    if (!RenderTimeWidget(state, time_rect)) {
         return false;
     }
 

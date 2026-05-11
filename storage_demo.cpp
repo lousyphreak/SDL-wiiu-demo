@@ -5,6 +5,12 @@
 namespace
 {
 
+static constexpr const char *kTitleFile = "storage-demo-title.txt";
+static constexpr const char *kSaveDir = "showcase";
+static constexpr const char *kSaveFile = "showcase/save-count.txt";
+static constexpr const char *kDirectIOFile = "showcase/direct-io.txt";
+static constexpr const char *kDirectIOPayload = "SDL Wii U native file IO OK\n";
+
 void CopyStorageDisplayString(char *destination, size_t destination_size, const char *source)
 {
     if (!destination || destination_size == 0) {
@@ -64,70 +70,192 @@ Uint32 HashStorageBytes(const Uint8 *bytes, size_t length)
     return hash;
 }
 
-void FormatDateTimeLine(char *destination, size_t destination_size, const char *label, const SDL_DateTime &dt, bool ready)
+void LogStorageSnapshot(const char *phase, const StorageDemoState *storage)
 {
-    int offset_hours;
-    int offset_minutes;
-    const char sign = (dt.utc_offset < 0) ? '-' : '+';
-    const int absolute_offset = (dt.utc_offset < 0) ? -dt.utc_offset : dt.utc_offset;
-
-    if (!destination || destination_size == 0) {
-        return;
-    }
-
-    if (!ready) {
-        SDL_strlcpy(destination, "time unavailable", destination_size);
-        return;
-    }
-
-    offset_hours = absolute_offset / 3600;
-    offset_minutes = (absolute_offset % 3600) / 60;
-    SDL_snprintf(destination, destination_size,
-                 "%s %04d-%02d-%02d %02d:%02d:%02d.%03d %c%02d:%02d",
-                 label,
-                 dt.year, dt.month, dt.day,
-                 dt.hour, dt.minute, dt.second,
-                 dt.nanosecond / SDL_NS_PER_MS,
-                 sign, offset_hours, offset_minutes);
-}
-
-const char *GetDateFormatLabel(SDL_DateFormat format)
-{
-    switch (format) {
-    case SDL_DATE_FORMAT_DDMMYYYY:
-        return "DMY";
-    case SDL_DATE_FORMAT_MMDDYYYY:
-        return "MDY";
-    case SDL_DATE_FORMAT_YYYYMMDD:
-    default:
-        return "YMD";
+    if (storage && storage->space_remaining_known) {
+        SDL_Log("[storage] %s title=%s user=%s count=%u free=%.1fMB raw=%s",
+                phase ? phase : "snapshot",
+                storage->title_ready ? "ok" : "miss",
+                storage->user_ready ? (storage->last_save_ok ? "flushed" : "open") : "fail",
+                (unsigned int)storage->save_count,
+                (double)storage->space_remaining / (1024.0 * 1024.0),
+                storage->raw_io_status[0] ? storage->raw_io_status : "---");
+    } else {
+        SDL_Log("[storage] %s title=%s user=%s count=%u free=--- raw=%s",
+                phase ? phase : "snapshot",
+                (storage && storage->title_ready) ? "ok" : "miss",
+                (storage && storage->user_ready) ? ((storage->last_save_ok) ? "flushed" : "open") : "fail",
+                storage ? (unsigned int)storage->save_count : 0,
+                (storage && storage->raw_io_status[0]) ? storage->raw_io_status : "---");
     }
 }
 
-const char *GetTimeFormatLabel(SDL_TimeFormat format)
+bool QueryStorageSpaceRemaining(SDL_Storage *storage, Uint64 *remaining)
 {
-    return (format == SDL_TIME_FORMAT_12HR) ? "12h" : "24h";
+    Uint64 value;
+    const char *error;
+
+    if (!storage || !remaining) {
+        return false;
+    }
+
+    SDL_ClearError();
+    value = SDL_GetStorageSpaceRemaining(storage);
+    error = SDL_GetError();
+    if (error && *error) {
+        SDL_ClearError();
+        *remaining = 0;
+        return false;
+    }
+
+    *remaining = value;
+    return true;
+}
+
+struct EnumerateCount
+{
+    Uint32 count;
+};
+
+SDL_EnumerationResult SDLCALL CountEntriesCallback(void *userdata, const char *dirname, const char *fname)
+{
+    EnumerateCount *counter = static_cast<EnumerateCount *>(userdata);
+    (void)dirname;
+    (void)fname;
+
+    if (counter) {
+        ++counter->count;
+    }
+    return SDL_ENUM_CONTINUE;
 }
 
 void RefreshStoragePaths(StorageDemoState *storage)
 {
     const char *base_path;
+    char *current_dir;
     char *pref_path;
 
     if (!storage) {
         return;
     }
 
+    storage->base_path[0] = '\0';
+    storage->current_dir[0] = '\0';
+    storage->pref_path[0] = '\0';
+    storage->pref_error[0] = '\0';
+
+    SDL_Log("[storage] paths base begin");
     base_path = SDL_GetBasePath();
     if (base_path) {
         CopyStorageDisplayString(storage->base_path, sizeof(storage->base_path), base_path);
     }
+    SDL_Log("[storage] paths base done: %s", storage->base_path[0] ? storage->base_path : "(null)");
 
+    SDL_Log("[storage] paths cwd begin");
+    current_dir = SDL_GetCurrentDirectory();
+    if (current_dir) {
+        CopyStorageDisplayString(storage->current_dir, sizeof(storage->current_dir), current_dir);
+        SDL_free(current_dir);
+    }
+    SDL_Log("[storage] paths cwd done: %s", storage->current_dir[0] ? storage->current_dir : "(null)");
+
+    SDL_Log("[storage] paths pref begin");
     pref_path = SDL_GetPrefPath("wiiu", "sdl-demo");
     if (pref_path) {
         CopyStorageDisplayString(storage->pref_path, sizeof(storage->pref_path), pref_path);
         SDL_free(pref_path);
+        SDL_Log("[storage] paths pref done: %s", storage->pref_path);
+    } else {
+        CopyStorageErrorString(storage->pref_error, sizeof(storage->pref_error));
+        SDL_Log("[storage] paths pref failed: %s", storage->pref_error);
     }
+}
+
+void RefreshRawFilesystemProbe(StorageDemoState *storage)
+{
+    EnumerateCount base_counter = {};
+    EnumerateCount pref_counter = {};
+    char *pref_path = nullptr;
+    char *title_path = nullptr;
+    char *save_dir = nullptr;
+    char *save_path = nullptr;
+
+    if (!storage) {
+        return;
+    }
+
+    storage->raw_base_ok = false;
+    storage->raw_pref_ok = false;
+    storage->raw_title_io_ok = false;
+    storage->raw_save_io_ok = false;
+    storage->raw_base_entries = 0;
+    storage->raw_pref_entries = 0;
+    storage->raw_io_status[0] = '\0';
+
+    RefreshStoragePaths(storage);
+
+    if (storage->base_path[0]) {
+        if (SDL_EnumerateDirectory(storage->base_path, CountEntriesCallback, &base_counter)) {
+            storage->raw_base_ok = true;
+            storage->raw_base_entries = base_counter.count;
+        } else {
+            CopyStorageErrorString(storage->raw_io_status, sizeof(storage->raw_io_status));
+            SDL_ClearError();
+        }
+
+        if (SDL_asprintf(&title_path, "%s%s", storage->base_path, kTitleFile) >= 0) {
+            size_t title_size = 0;
+            void *title_bytes = SDL_LoadFile(title_path, &title_size);
+            if (title_bytes && title_size > 0) {
+                storage->raw_title_io_ok = true;
+            } else if (!storage->raw_io_status[0]) {
+                CopyStorageErrorString(storage->raw_io_status, sizeof(storage->raw_io_status));
+            }
+            SDL_free(title_bytes);
+        }
+    }
+
+    pref_path = SDL_GetPrefPath("wiiu", "sdl-demo");
+    if (pref_path) {
+        if (SDL_EnumerateDirectory(pref_path, CountEntriesCallback, &pref_counter)) {
+            storage->raw_pref_ok = true;
+            storage->raw_pref_entries = pref_counter.count;
+        } else if (!storage->raw_io_status[0]) {
+            CopyStorageErrorString(storage->raw_io_status, sizeof(storage->raw_io_status));
+            SDL_ClearError();
+        }
+
+        if (SDL_asprintf(&save_dir, "%s%s/", pref_path, kSaveDir) >= 0 &&
+            SDL_CreateDirectory(save_dir) &&
+            SDL_asprintf(&save_path, "%s%s", pref_path, kDirectIOFile) >= 0 &&
+            SDL_SaveFile(save_path, kDirectIOPayload, SDL_strlen(kDirectIOPayload))) {
+            size_t loaded_size = 0;
+            char *loaded = static_cast<char *>(SDL_LoadFile(save_path, &loaded_size));
+            if (loaded && loaded_size == SDL_strlen(kDirectIOPayload) &&
+                SDL_memcmp(loaded, kDirectIOPayload, loaded_size) == 0) {
+                storage->raw_save_io_ok = true;
+            } else if (!storage->raw_io_status[0]) {
+                CopyStorageErrorString(storage->raw_io_status, sizeof(storage->raw_io_status));
+            }
+            SDL_free(loaded);
+        } else if (!storage->raw_io_status[0]) {
+            CopyStorageErrorString(storage->raw_io_status, sizeof(storage->raw_io_status));
+        }
+    }
+
+    if (storage->raw_base_ok && storage->raw_pref_ok && storage->raw_title_io_ok && storage->raw_save_io_ok) {
+        SDL_snprintf(storage->raw_io_status, sizeof(storage->raw_io_status),
+                     "cwd ok raw b%u p%u io ok",
+                     (unsigned int)storage->raw_base_entries,
+                     (unsigned int)storage->raw_pref_entries);
+    } else if (!storage->raw_io_status[0]) {
+        SDL_strlcpy(storage->raw_io_status, "raw probe incomplete", sizeof(storage->raw_io_status));
+    }
+
+    SDL_free(pref_path);
+    SDL_free(title_path);
+    SDL_free(save_dir);
+    SDL_free(save_path);
 }
 
 bool ReadStoredCounter(SDL_Storage *storage, const char *path, Uint32 *count)
@@ -171,8 +299,6 @@ void ResetStorageDemoState(StorageDemoState *storage)
 
 bool PersistStorageCounter(StorageDemoState *storage, Uint32 new_count)
 {
-    static constexpr const char *save_dir = "showcase";
-    static constexpr const char *save_file = "showcase/save-count.txt";
     SDL_Storage *user_storage;
     char buffer[32];
     int length;
@@ -187,37 +313,42 @@ bool PersistStorageCounter(StorageDemoState *storage, Uint32 new_count)
     if (!user_storage) {
         storage->user_ready = false;
         CopyStorageErrorString(storage->user_error, sizeof(storage->user_error));
+        SDL_Log("[storage] persist-open failed: %s", storage->user_error);
         return false;
     }
 
     if (!SDL_StorageReady(user_storage)) {
         storage->user_ready = false;
         CopyStorageErrorString(storage->user_error, sizeof(storage->user_error));
+        SDL_Log("[storage] persist-not-ready: %s", storage->user_error);
         SDL_CloseStorage(user_storage);
         return false;
     }
 
-    if (!SDL_CreateStorageDirectory(user_storage, save_dir)) {
+    if (!SDL_CreateStorageDirectory(user_storage, kSaveDir)) {
         storage->user_ready = false;
         CopyStorageErrorString(storage->user_error, sizeof(storage->user_error));
+        SDL_Log("[storage] persist-mkdir failed: %s", storage->user_error);
         SDL_CloseStorage(user_storage);
         return false;
     }
 
     length = SDL_snprintf(buffer, sizeof(buffer), "%u", (unsigned int)new_count);
     if (length <= 0 || length >= (int)sizeof(buffer) ||
-        !SDL_WriteStorageFile(user_storage, save_file, buffer, (Uint64)length)) {
+        !SDL_WriteStorageFile(user_storage, kSaveFile, buffer, (Uint64)length)) {
         storage->user_ready = false;
         CopyStorageErrorString(storage->user_error, sizeof(storage->user_error));
+        SDL_Log("[storage] persist-write failed: %s", storage->user_error);
         SDL_CloseStorage(user_storage);
         return false;
     }
 
-    storage->space_remaining = SDL_GetStorageSpaceRemaining(user_storage);
+    storage->space_remaining_known = QueryStorageSpaceRemaining(user_storage, &storage->space_remaining);
     close_result = SDL_CloseStorage(user_storage);
     if (!close_result) {
         storage->user_ready = false;
         CopyStorageErrorString(storage->user_error, sizeof(storage->user_error));
+        SDL_Log("[storage] persist-close failed: %s", storage->user_error);
         return false;
     }
 
@@ -226,14 +357,13 @@ bool PersistStorageCounter(StorageDemoState *storage, Uint32 new_count)
     storage->save_count = new_count;
     storage->last_write_ns = SDL_GetTicksNS();
     storage->user_error[0] = '\0';
-    RefreshStoragePaths(storage);
+    RefreshRawFilesystemProbe(storage);
+    LogStorageSnapshot("persist", storage);
     return true;
 }
 
 bool InitStorageDemo(AppState *state)
 {
-    static constexpr const char *title_file = "storage-demo-title.txt";
-    static constexpr const char *save_file = "showcase/save-count.txt";
     StorageDemoState *storage;
     SDL_Storage *title_storage;
     SDL_Storage *user_storage;
@@ -245,8 +375,11 @@ bool InitStorageDemo(AppState *state)
 
     storage = &state->storage;
     ResetStorageDemoState(storage);
+    SDL_Log("[storage] init paths begin");
     RefreshStoragePaths(storage);
+    SDL_Log("[storage] init paths done");
 
+    SDL_Log("[storage] init title-open begin");
     title_storage = SDL_OpenTitleStorage(nullptr, 0);
     if (!title_storage) {
         CopyStorageErrorString(storage->title_error, sizeof(storage->title_error));
@@ -257,11 +390,11 @@ bool InitStorageDemo(AppState *state)
     } else {
         Uint64 title_size = 0;
 
-        if (SDL_GetStorageFileSize(title_storage, title_file, &title_size) &&
+        if (SDL_GetStorageFileSize(title_storage, kTitleFile, &title_size) &&
             title_size > 0 && title_size < 4096) {
             Uint8 *bytes = static_cast<Uint8 *>(SDL_malloc((size_t)title_size + 1));
 
-            if (bytes && SDL_ReadStorageFile(title_storage, title_file, bytes, title_size)) {
+            if (bytes && SDL_ReadStorageFile(title_storage, kTitleFile, bytes, title_size)) {
                 bytes[(size_t)title_size] = '\0';
                 storage->title_ready = true;
                 storage->title_bytes = title_size;
@@ -281,54 +414,118 @@ bool InitStorageDemo(AppState *state)
             CopyStorageErrorString(storage->title_error, sizeof(storage->title_error));
         }
     }
+    SDL_Log("[storage] init title-open done");
 
+    SDL_Log("[storage] init user-open begin");
     user_storage = SDL_OpenUserStorage("wiiu", "sdl-demo", 0);
     if (!user_storage) {
         CopyStorageErrorString(storage->user_error, sizeof(storage->user_error));
+        SDL_Log("[storage] init user-open failed: %s", storage->user_error);
         return true;
     }
+    SDL_Log("[storage] init user-open done");
 
     if (!SDL_StorageReady(user_storage)) {
         CopyStorageErrorString(storage->user_error, sizeof(storage->user_error));
+        SDL_Log("[storage] init user-not-ready: %s", storage->user_error);
         SDL_CloseStorage(user_storage);
         return true;
     }
+    SDL_Log("[storage] init user-ready done");
 
     storage->user_ready = true;
-    storage->space_remaining = SDL_GetStorageSpaceRemaining(user_storage);
-    if (!ReadStoredCounter(user_storage, save_file, &initial_count)) {
+    SDL_Log("[storage] init user-space begin");
+    storage->space_remaining_known = QueryStorageSpaceRemaining(user_storage, &storage->space_remaining);
+    SDL_Log("[storage] init user-space done: %s",
+            storage->space_remaining_known ? "available" : "unsupported");
+    SDL_Log("[storage] init read-counter begin");
+    if (!ReadStoredCounter(user_storage, kSaveFile, &initial_count)) {
         storage->user_ready = false;
         CopyStorageErrorString(storage->user_error, sizeof(storage->user_error));
+        SDL_Log("[storage] init read-counter failed: %s", storage->user_error);
     }
+    SDL_Log("[storage] init read-counter done: %u", (unsigned int)initial_count);
 
+    SDL_Log("[storage] init user-close begin");
     if (!SDL_CloseStorage(user_storage) && storage->user_ready) {
         storage->user_ready = false;
         CopyStorageErrorString(storage->user_error, sizeof(storage->user_error));
+        SDL_Log("[storage] init user-close failed: %s", storage->user_error);
     }
+    SDL_Log("[storage] init user-close done");
 
     if (storage->user_ready) {
+        SDL_Log("[storage] init persist begin");
         (void)PersistStorageCounter(storage, initial_count + 1);
+        SDL_Log("[storage] init persist done");
+    } else {
+        SDL_Log("[storage] init raw-probe begin");
+        RefreshRawFilesystemProbe(storage);
+        SDL_Log("[storage] init raw-probe done");
     }
+
+    LogStorageSnapshot("init", storage);
 
     return true;
 }
 
 bool RenderStorageWidget(AppState *state, const SDL_FRect &rect)
 {
-    const StorageDemoState &storage = state->storage;
-    const TimeDemoState &time_demo = state->time_demo;
+    StorageDemoState *storage = &state->storage;
     const float padding = 10.0f;
     const float line_height = (float)SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE + 2.0f;
     const float text_x = rect.x + padding;
     const float text_y = rect.y + 10.0f;
-    const float pulse_amount = (storage.last_write_ns > 0)
-                                   ? SDL_clamp(1.0f - (float)((SDL_GetTicksNS() - storage.last_write_ns) / (double)(SDL_NS_PER_SECOND * 2)), 0.0f, 1.0f)
+    const float pulse_amount = (storage->last_write_ns > 0)
+                                   ? SDL_clamp(1.0f - (float)((SDL_GetTicksNS() - storage->last_write_ns) / (double)(SDL_NS_PER_SECOND * 2)), 0.0f, 1.0f)
                                    : 0.0f;
-    const Uint8 accent_r = storage.user_ready ? 120 : 255;
-    const Uint8 accent_g = storage.user_ready ? 220 : 120;
-    const Uint8 accent_b = storage.title_ready ? 255 : 140;
-    char utc_line[96];
-    char local_line[96];
+    const Uint8 accent_r = storage->user_ready ? 120 : 255;
+    const Uint8 accent_g = storage->user_ready ? 220 : 120;
+    const Uint8 accent_b = storage->title_ready ? 255 : 140;
+    char preview_line[40];
+    char status_value[48];
+    char status_line[54];
+    char space_line[40];
+    char cwd_value[36];
+    char pref_value[36];
+    char cwd_line[40];
+    char pref_line[52];
+
+    if (!storage->render_logged) {
+        SDL_Log("[storage] render-window rect=(%.0f,%.0f %.0fx%.0f)",
+                rect.x, rect.y, rect.w, rect.h);
+        storage->render_logged = true;
+    }
+
+    CopyStorageDisplayString(preview_line, sizeof(preview_line),
+                             storage->title_ready ? storage->title_preview : storage->title_error);
+    CopyStorageDisplayString(status_value, sizeof(status_value),
+                             storage->user_ready
+                                 ? (storage->raw_io_status[0] ? storage->raw_io_status : "raw probe pending")
+                                 : (storage->user_error[0] ? storage->user_error
+                                                           : (storage->pref_error[0] ? storage->pref_error : "user storage unavailable")));
+    SDL_snprintf(status_line, sizeof(status_line), "%s %s",
+                 storage->user_ready ? "raw" : "save!",
+                 status_value);
+    if (storage->user_ready) {
+        SDL_snprintf(space_line, sizeof(space_line), "free %.1fMB  P:+1  R:reset",
+                     (double)storage->space_remaining / (1024.0 * 1024.0));
+    } else {
+        SDL_strlcpy(space_line, "free ---   P:+1  R:reset", sizeof(space_line));
+    }
+    if (storage->user_ready && !storage->space_remaining_known) {
+        SDL_strlcpy(space_line, "free ---   P:+1  R:reset", sizeof(space_line));
+    }
+    CopyStorageDisplayString(cwd_value, sizeof(cwd_value), storage->current_dir[0] ? storage->current_dir : "---");
+    SDL_snprintf(cwd_line, sizeof(cwd_line), "cwd %s", cwd_value);
+    if (storage->pref_path[0]) {
+        CopyStorageDisplayString(pref_value, sizeof(pref_value), storage->pref_path);
+        SDL_snprintf(pref_line, sizeof(pref_line), "pref %s", pref_value);
+    } else {
+        CopyStorageDisplayString(pref_value, sizeof(pref_value),
+                                 storage->pref_error[0] ? storage->pref_error : "unavailable");
+        SDL_snprintf(pref_line, sizeof(pref_line), "pref! %s", pref_value);
+    }
 
     if (!SetColor(state->renderer, 8, 12, 28, 228) ||
         !SDL_RenderFillRect(state->renderer, &rect) ||
@@ -346,7 +543,7 @@ bool RenderStorageWidget(AppState *state, const SDL_FRect &rect)
     }
 
     for (int i = 0; i < 8; ++i) {
-        const bool lit = ((storage.title_signature >> (i * 4)) & 0xF) != 0;
+        const bool lit = ((storage->title_signature >> (i * 4)) & 0xF) != 0;
         const SDL_FRect pip = {
             rect.x + rect.w - 86.0f + i * 9.0f,
             rect.y + 10.0f,
@@ -376,39 +573,20 @@ bool RenderStorageWidget(AppState *state, const SDL_FRect &rect)
         }
     }
 
-    FormatDateTimeLine(utc_line, sizeof(utc_line), "utc", time_demo.utc_time, time_demo.utc_ready);
-    FormatDateTimeLine(local_line, sizeof(local_line), "loc", time_demo.local_time, time_demo.local_ready);
-
     if (!SetColor(state->renderer, 230, 240, 255, 255) ||
-        !SDL_RenderDebugText(state->renderer, text_x, text_y, "storage + time") ||
+        !SDL_RenderDebugText(state->renderer, text_x, text_y, "storage window") ||
         !SDL_RenderDebugTextFormat(state->renderer, text_x, text_y + line_height,
-                                   "title %s  %llu bytes  save %s  count %u",
-                                    storage.title_ready ? "ok" : "miss",
-                                    (unsigned long long)storage.title_bytes,
-                                    storage.user_ready ? (storage.last_save_ok ? "flushed" : "open") : "fail",
-                                    (unsigned int)storage.save_count) ||
-        !SDL_RenderDebugTextFormat(state->renderer, text_x, text_y + line_height * 3.0f,
-                                   "free %.1f MB  NORTH/P +1  WEST/R reset",
-                                    (double)storage.space_remaining / (1024.0 * 1024.0)) ||
+                                   "ttl %s %lluB save %s #%u",
+                                   storage->title_ready ? "ok" : "miss",
+                                   (unsigned long long)storage->title_bytes,
+                                   storage->user_ready ? (storage->last_save_ok ? "flush" : "open") : "fail",
+                                   (unsigned int)storage->save_count) ||
         !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 2.0f,
-                             storage.title_ready ? storage.title_preview : storage.title_error) ||
-        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 4.0f, utc_line) ||
-        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 5.0f, local_line) ||
-        !SDL_RenderDebugTextFormat(state->renderer, text_x, text_y + line_height * 6.0f,
-                                   "pref %s %s  rt %.3f ms",
-                                   time_demo.locale_ready ? GetDateFormatLabel(time_demo.date_format) : "---",
-                                   time_demo.locale_ready ? GetTimeFormatLabel(time_demo.time_format) : "---",
-                                   (double)time_demo.roundtrip_error_ns / (double)SDL_NS_PER_MS) ||
-        !SDL_RenderDebugTextFormat(state->renderer, text_x, text_y + line_height * 7.0f,
-                                   "perf %.1fMHz up %.1fs frame %.2fms",
-                                   (double)time_demo.performance_frequency / 1000000.0,
-                                   (double)SDL_GetTicksNS() / (double)SDL_NS_PER_SECOND,
-                                   (double)time_demo.frame_delta_ns / (double)SDL_NS_PER_MS) ||
-        !SDL_RenderDebugTextFormat(state->renderer, text_x, text_y + line_height * 8.0f,
-                                   "delay %.2fms timer %u @ %.2fms",
-                                   (double)time_demo.delay_elapsed_ns / (double)SDL_NS_PER_MS,
-                                   (unsigned int)time_demo.observed_timer_pulse_count,
-                                   (double)(time_demo.timer_observed_period_ns ? time_demo.timer_observed_period_ns : time_demo.timer_interval_ns) / (double)SDL_NS_PER_MS)) {
+                             preview_line) ||
+        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 3.0f, space_line) ||
+        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 4.0f, status_line) ||
+        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 5.0f, cwd_line) ||
+        !SDL_RenderDebugText(state->renderer, text_x, text_y + line_height * 6.0f, pref_line)) {
         return false;
     }
 
