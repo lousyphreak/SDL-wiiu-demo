@@ -166,7 +166,7 @@ SDL_AppResult SDL_AppInit(void **appstate, int argc, char *argv[])
     (void)argv;
 
     SDL_SetAppMetadata("SDL Wii U Render Demo", "1.0", "org.wiiu.sdl-demo");
-    SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "60");
+    SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, "0");
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK | SDL_INIT_CAMERA)) {
         SDL_Log("SDL_Init failed: %s", SDL_GetError());
@@ -343,17 +343,21 @@ SDL_AppResult SDL_AppIterate(void *appstate)
         return SDL_APP_FAILURE;
     }
 
+    BeginTimeDemoFrame(state);
     PollInputDemo(state);
     UpdateAudioDemo(state);
     UpdateCameraDemo(state);
     UpdateStorageDemo(state);
     UpdateTimeDemo(state);
+    MarkTimeDemoUpdatesComplete(state);
     if (!RenderFrame(state)) {
         return SDL_APP_FAILURE;
     }
+    MarkTimeDemoMainRenderComplete(state);
     if (!RenderDrcFrame(state)) {
         return SDL_APP_FAILURE;
     }
+    EndTimeDemoFrame(state);
     return SDL_APP_CONTINUE;
 }
 

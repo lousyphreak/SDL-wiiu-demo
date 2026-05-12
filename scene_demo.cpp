@@ -360,17 +360,20 @@ bool RenderRendererShowcase(AppState *state, int width, int height, double time,
     return true;
 }
 
-bool RenderDrcScene(SDL_Renderer *renderer)
+bool RenderDrcScene(AppState *state, SDL_Renderer *renderer)
 {
     const double time = (double)SDL_GetTicks() / 1000.0;
     SDL_FRect stripes[8];
     SDL_FPoint wave[48];
+    Uint64 stage_start_ns;
     int width = 0;
     int height = 0;
 
-    if (!renderer) {
+    if (!state || !renderer) {
         return false;
     }
+
+    stage_start_ns = SDL_GetTicksNS();
 
     if (!SDL_GetRenderOutputSize(renderer, &width, &height)) {
         SDL_Log("SDL_GetRenderOutputSize(DRC) failed: %s", SDL_GetError());
@@ -439,10 +442,13 @@ bool RenderDrcScene(SDL_Renderer *renderer)
         return false;
     }
 
+    state->time_demo.drc_scene_duration_ns = SDL_GetTicksNS() - stage_start_ns;
+    stage_start_ns = SDL_GetTicksNS();
     if (!SDL_RenderPresent(renderer)) {
         SDL_Log("SDL_RenderPresent(DRC) failed: %s", SDL_GetError());
         return false;
     }
+    state->time_demo.drc_present_duration_ns = SDL_GetTicksNS() - stage_start_ns;
 
     return true;
 }
@@ -482,7 +488,9 @@ bool RenderFrame(AppState *state)
     int scene_center_x;
     int scene_center_y;
     float scene_energy;
+    Uint64 stage_start_ns;
 
+    stage_start_ns = SDL_GetTicksNS();
     if (!RebuildBackgroundTexture(state)) {
         return false;
     }
@@ -490,6 +498,7 @@ bool RenderFrame(AppState *state)
     if (!EnsureShowcaseTexture(state)) {
         return false;
     }
+    state->time_demo.main_cache_duration_ns = SDL_GetTicksNS() - stage_start_ns;
 
     width = state->background_width;
     height = state->background_height;
@@ -498,6 +507,7 @@ bool RenderFrame(AppState *state)
     scene_center_y = horizon - 24 + (int)(left_y * 70.0f);
     scene_energy = 1.0f + left_trigger + right_trigger;
 
+    stage_start_ns = SDL_GetTicksNS();
     if (!SDL_SetRenderDrawColor(state->renderer, 128, 0, 128, 255) ||
         !SDL_RenderClear(state->renderer) ||
         !SDL_RenderTexture(state->renderer, state->background, nullptr, nullptr)) {
@@ -588,32 +598,43 @@ bool RenderFrame(AppState *state)
             return false;
         }
     }
+    state->time_demo.main_scene_duration_ns = SDL_GetTicksNS() - stage_start_ns;
 
+    stage_start_ns = SDL_GetTicksNS();
     if (!RenderRendererShowcase(state, width, height, time, horizon, left_x, left_y,
                                 right_x, right_y, left_trigger, right_trigger)) {
         SDL_Log("Failed to render renderer showcase: %s", SDL_GetError());
         return false;
     }
+    state->time_demo.main_showcase_duration_ns = SDL_GetTicksNS() - stage_start_ns;
 
+    stage_start_ns = SDL_GetTicksNS();
     if (!RenderCameraDemo(state, width, height, horizon)) {
         SDL_Log("Failed to render camera showcase: %s", SDL_GetError());
         return false;
     }
+    state->time_demo.main_camera_duration_ns = SDL_GetTicksNS() - stage_start_ns;
 
+    stage_start_ns = SDL_GetTicksNS();
     if (!RenderInputOverlay(state, width, height)) {
         SDL_Log("Failed to render input overlay: %s", SDL_GetError());
         return false;
     }
+    state->time_demo.main_overlay_duration_ns = SDL_GetTicksNS() - stage_start_ns;
 
+    stage_start_ns = SDL_GetTicksNS();
     if (!RenderMouseCursor(state, width, height)) {
         SDL_Log("Failed to render mouse cursor: %s", SDL_GetError());
         return false;
     }
+    state->time_demo.main_cursor_duration_ns = SDL_GetTicksNS() - stage_start_ns;
 
+    stage_start_ns = SDL_GetTicksNS();
     if (!SDL_RenderPresent(state->renderer)) {
         SDL_Log("SDL_RenderPresent failed: %s", SDL_GetError());
         return false;
     }
+    state->time_demo.main_present_duration_ns = SDL_GetTicksNS() - stage_start_ns;
 
     if (!state->first_frame_complete) {
         state->first_frame_complete = true;
@@ -628,5 +649,5 @@ bool RenderDrcFrame(AppState *state)
         return true;
     }
 
-    return RenderDrcScene(state->drc_renderer);
+    return RenderDrcScene(state, state->drc_renderer);
 }

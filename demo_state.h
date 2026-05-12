@@ -109,6 +109,14 @@ struct StorageDemoState
     char user_error[96];
 };
 
+struct TimingMetricStats
+{
+    Uint64 total_ns;
+    Uint64 min_ns;
+    Uint64 max_ns;
+    Uint32 sample_count;
+};
+
 struct TimeDemoState
 {
     SDL_TimerID timer_id;
@@ -119,8 +127,26 @@ struct TimeDemoState
     Uint64 last_timer_observation_ns;
     Uint64 timer_observed_period_ns;
     Uint64 performance_frequency;
-    Uint64 last_performance_counter;
+    Uint64 frame_start_counter;
+    Uint64 last_frame_start_counter;
+    Uint64 update_complete_counter;
+    Uint64 main_render_complete_counter;
     Uint64 frame_delta_ns;
+    Uint64 interframe_idle_ns;
+    Uint64 update_duration_ns;
+    Uint64 main_render_duration_ns;
+    Uint64 drc_render_duration_ns;
+    Uint64 frame_total_ns;
+    Uint64 last_completed_frame_total_ns;
+    Uint64 main_cache_duration_ns;
+    Uint64 main_scene_duration_ns;
+    Uint64 main_showcase_duration_ns;
+    Uint64 main_camera_duration_ns;
+    Uint64 main_overlay_duration_ns;
+    Uint64 main_cursor_duration_ns;
+    Uint64 main_present_duration_ns;
+    Uint64 drc_scene_duration_ns;
+    Uint64 drc_present_duration_ns;
     Uint64 delay_request_ns;
     Uint64 delay_elapsed_ns;
     SDL_Time current_time;
@@ -129,11 +155,30 @@ struct TimeDemoState
     SDL_DateFormat date_format;
     SDL_TimeFormat time_format;
     Uint64 roundtrip_error_ns;
+    TimingMetricStats callback_stats;
+    TimingMetricStats idle_stats;
+    TimingMetricStats update_stats;
+    TimingMetricStats main_render_stats;
+    TimingMetricStats drc_render_stats;
+    TimingMetricStats frame_total_stats;
+    TimingMetricStats main_cache_stats;
+    TimingMetricStats main_scene_stats;
+    TimingMetricStats main_showcase_stats;
+    TimingMetricStats main_camera_stats;
+    TimingMetricStats main_overlay_stats;
+    TimingMetricStats main_cursor_stats;
+    TimingMetricStats main_present_stats;
+    TimingMetricStats drc_scene_stats;
+    TimingMetricStats drc_present_stats;
+    double main_callback_rate_hz;
+    int renderer_vsync;
     bool locale_ready;
     bool current_time_ready;
     bool utc_ready;
     bool local_ready;
     bool roundtrip_ready;
+    bool main_callback_wait_event;
+    bool renderer_vsync_known;
     bool render_logged;
 };
 
