@@ -2,6 +2,7 @@
 
 #include "input_demo.h"
 #include "render_utils.h"
+#include <SDL3_mixer/SDL_mixer.h>
 
 namespace
 {
@@ -214,6 +215,12 @@ void ShutdownAudioDemo(AppState *state)
         SDL_DestroyAudioStream(state->audio.playback_stream);
         state->audio.playback_stream = nullptr;
     }
+
+    if (state->audio.mixer_available) {
+        MIX_Quit();
+        state->audio.mixer_available = false;
+        state->audio.mixer_decoder_count = 0;
+    }
 }
 
 bool InitAudioDemo(AppState *state)
@@ -315,6 +322,19 @@ bool InitAudioDemo(AppState *state)
                 SDL_ResumeAudioStreamDevice(state->audio.capture_stream);
             }
         }
+    }
+
+    if (!MIX_Init()) {
+        SDL_Log("SDL_mixer initialization failed: %s", SDL_GetError());
+        return false;
+    }
+
+    state->audio.mixer_available = true;
+    state->audio.mixer_decoder_count = MIX_GetNumAudioDecoders();
+    SDL_Log("[audio_demo] SDL_mixer ready with %d decoder(s)", state->audio.mixer_decoder_count);
+    for (int i = 0; i < state->audio.mixer_decoder_count; ++i) {
+        const char *name = MIX_GetAudioDecoder(i);
+        SDL_Log("[audio_demo]   decoder[%d] = %s", i, name ? name : "(null)");
     }
 
     return true;
@@ -472,7 +492,7 @@ bool RenderAudioWidget(AppState *state, const SDL_FRect &rect)
     const float pan_center_x = pan_rect.x + pan_rect.w * 0.5f;
     const float pan_center_y = pan_rect.y + pan_rect.h * 0.5f;
     const float pan_scale = (pan_rect.w - 10.0f) * 0.5f;
-    char mode_label[24];
+    char mode_label[64];
 
     if (!SetColor(state->renderer, 9, 14, 30, 228) ||
         !SDL_RenderFillRect(state->renderer, &rect) ||
@@ -536,7 +556,15 @@ bool RenderAudioWidget(AppState *state, const SDL_FRect &rect)
         }
     }
 
-    SDL_snprintf(mode_label, sizeof(mode_label), "L pan %s", GetPlaybackModeLabel(state->audio.playback_channels));
+    if (state->audio.mixer_available) {
+        SDL_snprintf(mode_label,
+                     sizeof(mode_label),
+                     "L pan %s mix %d dec",
+                     GetPlaybackModeLabel(state->audio.playback_channels),
+                     state->audio.mixer_decoder_count);
+    } else {
+        SDL_snprintf(mode_label, sizeof(mode_label), "L pan %s mix off", GetPlaybackModeLabel(state->audio.playback_channels));
+    }
 
     if (!SetColor(state->renderer, 18, 26, 54, 255) ||
         !SDL_RenderFillRect(state->renderer, &pan_rect) ||

@@ -62,7 +62,9 @@ struct AudioDemoState
     float capture_level;
     float loopback_level;
     int playback_channels;
+    int mixer_decoder_count;
     bool capture_available;
+    bool mixer_available;
     bool monitoring_enabled;
 };
 
