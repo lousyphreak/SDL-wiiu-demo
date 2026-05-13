@@ -3,6 +3,187 @@
 #include "input_demo.h"
 #include "render_utils.h"
 
+namespace
+{
+
+constexpr int kMaxDemoChannels = 6;
+constexpr float kPanDeadzone = 0.18f;
+
+struct SpatialSpeaker
+{
+    int channel;
+    float x;
+    float y;
+};
+
+float ApplyPanDeadzone(float raw_x, float raw_y, float *pan_x, float *pan_y)
+{
+    const float length = SDL_sqrtf((raw_x * raw_x) + (raw_y * raw_y));
+
+    if (!pan_x || !pan_y) {
+        return 0.0f;
+    }
+
+    if (length <= kPanDeadzone) {
+        *pan_x = 0.0f;
+        *pan_y = 0.0f;
+        return 0.0f;
+    }
+
+    if (length >= 1.0f) {
+        const float inv_length = (length > 0.0f) ? (1.0f / length) : 0.0f;
+        *pan_x = raw_x * inv_length;
+        *pan_y = raw_y * inv_length;
+        return 1.0f;
+    }
+
+    {
+        const float scaled_length = (length - kPanDeadzone) / (1.0f - kPanDeadzone);
+        const float scale = scaled_length / length;
+        *pan_x = raw_x * scale;
+        *pan_y = raw_y * scale;
+        return scaled_length;
+    }
+}
+
+const char *GetPlaybackModeLabel(int channels)
+{
+    switch (channels) {
+    case 1:
+        return "mono";
+    case 2:
+        return "stereo";
+    case 4:
+        return "quad";
+    case 5:
+        return "4.1";
+    case 6:
+        return "5.1";
+    default:
+        return "audio";
+    }
+}
+
+void BuildSpatialMix(int playback_channels, float pan_x, float pan_y, float *gains)
+{
+    float amount;
+
+    if (!gains) {
+        return;
+    }
+
+    for (int i = 0; i < kMaxDemoChannels; ++i) {
+        gains[i] = 0.0f;
+    }
+
+    if (playback_channels <= 1) {
+        gains[0] = 1.0f;
+        return;
+    }
+
+    if (playback_channels == 2) {
+        const float left_weight = SDL_clamp((1.0f - pan_x) * 0.5f, 0.0f, 1.0f);
+        const float right_weight = SDL_clamp((1.0f + pan_x) * 0.5f, 0.0f, 1.0f);
+        gains[0] = SDL_sqrtf(left_weight);
+        gains[1] = SDL_sqrtf(right_weight);
+        return;
+    }
+
+    amount = SDL_min(SDL_sqrtf((pan_x * pan_x) + (pan_y * pan_y)), 1.0f);
+
+    {
+        SpatialSpeaker speakers[5];
+        float neutral[kMaxDemoChannels];
+        float directional[kMaxDemoChannels];
+        int directional_count = 0;
+        int lfe_channel = -1;
+        int front_left = 0;
+        int front_right = 1;
+        int front_center = -1;
+        int back_left = -1;
+        int back_right = -1;
+
+        for (int i = 0; i < kMaxDemoChannels; ++i) {
+            neutral[i] = 0.0f;
+            directional[i] = 0.0f;
+        }
+
+        switch (playback_channels) {
+        case 3:
+            lfe_channel = 2;
+            break;
+        case 4:
+            back_left = 2;
+            back_right = 3;
+            break;
+        case 5:
+            lfe_channel = 2;
+            back_left = 3;
+            back_right = 4;
+            break;
+        default:
+            front_center = 2;
+            lfe_channel = 3;
+            back_left = 4;
+            back_right = 5;
+            break;
+        }
+
+        speakers[directional_count++] = { front_left, -0.70710678f, 0.70710678f };
+        speakers[directional_count++] = { front_right, 0.70710678f, 0.70710678f };
+
+        if (front_center >= 0) {
+            speakers[directional_count++] = { front_center, 0.0f, 1.0f };
+        }
+
+        if (back_left >= 0 && back_right >= 0) {
+            speakers[directional_count++] = { back_left, -0.70710678f, -0.70710678f };
+            speakers[directional_count++] = { back_right, 0.70710678f, -0.70710678f };
+        }
+
+        for (int i = 0; i < directional_count; ++i) {
+            neutral[speakers[i].channel] = 1.0f / (float)directional_count;
+        }
+
+        if (amount > 0.0f) {
+            float sum = 0.0f;
+
+            for (int i = 0; i < directional_count; ++i) {
+                const float dot = SDL_max(0.0f, (pan_x * speakers[i].x) + (pan_y * speakers[i].y));
+                const float weight = dot * dot;
+                directional[speakers[i].channel] = weight;
+                sum += weight;
+            }
+
+            if (sum > 0.0f) {
+                for (int i = 0; i < directional_count; ++i) {
+                    directional[speakers[i].channel] /= sum;
+                }
+            } else {
+                for (int i = 0; i < directional_count; ++i) {
+                    directional[speakers[i].channel] = neutral[speakers[i].channel];
+                }
+            }
+        } else {
+            for (int i = 0; i < directional_count; ++i) {
+                directional[speakers[i].channel] = neutral[speakers[i].channel];
+            }
+        }
+
+        for (int i = 0; i < directional_count; ++i) {
+            const int channel = speakers[i].channel;
+            const float weight = (neutral[channel] * (1.0f - amount)) + (directional[channel] * amount);
+            gains[channel] = SDL_sqrtf(SDL_max(weight, 0.0f));
+        }
+
+        if (lfe_channel >= 0) {
+            gains[lfe_channel] = 0.16f;
+        }
+    }
+}
+
+} // namespace
+
 void ResetAudioDemoState(AudioDemoState *audio)
 {
     if (!audio) {
@@ -39,12 +220,20 @@ bool InitAudioDemo(AppState *state)
 {
     SDL_AudioDeviceID playback_device;
     SDL_AudioSpec playback_device_spec;
+    SDL_AudioSpec requested_playback_spec;
+    int playback_map_count = 0;
+    int *playback_map = nullptr;
 
     if (!state) {
         return false;
     }
 
-    playback_device = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, nullptr);
+    SDL_zero(requested_playback_spec);
+    requested_playback_spec.format = SDL_AUDIO_F32;
+    requested_playback_spec.channels = 6;
+    requested_playback_spec.freq = 48000;
+
+    playback_device = SDL_OpenAudioDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &requested_playback_spec);
     if (!playback_device) {
         SDL_Log("SDL_OpenAudioDevice(default playback) failed: %s", SDL_GetError());
         return false;
@@ -52,10 +241,36 @@ bool InitAudioDemo(AppState *state)
 
     SDL_PauseAudioDevice(playback_device);
     SDL_GetAudioDeviceFormat(playback_device, &playback_device_spec, nullptr);
+    playback_map = SDL_GetAudioDeviceChannelMap(playback_device, &playback_map_count);
+    if (playback_map) {
+        SDL_Log("[audio_demo] playback requested fmt=0x%x ch=%u freq=%d -> opened fmt=0x%x ch=%u freq=%d map=[%d,%d,%d,%d,%d,%d]",
+                (unsigned int)requested_playback_spec.format,
+                (unsigned int)requested_playback_spec.channels,
+                requested_playback_spec.freq,
+                (unsigned int)playback_device_spec.format,
+                (unsigned int)playback_device_spec.channels,
+                playback_device_spec.freq,
+                playback_map_count > 0 ? playback_map[0] : -1,
+                playback_map_count > 1 ? playback_map[1] : -1,
+                playback_map_count > 2 ? playback_map[2] : -1,
+                playback_map_count > 3 ? playback_map[3] : -1,
+                playback_map_count > 4 ? playback_map[4] : -1,
+                playback_map_count > 5 ? playback_map[5] : -1);
+        SDL_free(playback_map);
+    } else {
+        SDL_Log("[audio_demo] playback requested fmt=0x%x ch=%u freq=%d -> opened fmt=0x%x ch=%u freq=%d map=default",
+                (unsigned int)requested_playback_spec.format,
+                (unsigned int)requested_playback_spec.channels,
+                requested_playback_spec.freq,
+                (unsigned int)playback_device_spec.format,
+                (unsigned int)playback_device_spec.channels,
+                playback_device_spec.freq);
+    }
 
     state->audio.mix_spec.format = SDL_AUDIO_F32;
     state->audio.mix_spec.channels = playback_device_spec.channels;
     state->audio.mix_spec.freq = playback_device_spec.freq;
+    state->audio.playback_channels = (int)playback_device_spec.channels;
     state->audio.playback_stream = SDL_CreateAudioStream(&state->audio.mix_spec, &playback_device_spec);
     if (!state->audio.playback_stream) {
         SDL_Log("SDL_CreateAudioStream(playback) failed: %s", SDL_GetError());
@@ -110,17 +325,21 @@ void UpdateAudioDemo(AppState *state)
     constexpr float tau = 6.28318530717958647692f;
     constexpr int tone_chunk_frames = 512;
     constexpr int capture_chunk_frames = 256;
-    constexpr int max_demo_channels = 6;
 
-    float tone_buffer[tone_chunk_frames * max_demo_channels];
-    float capture_buffer[capture_chunk_frames * max_demo_channels];
-    float loopback_buffer[capture_chunk_frames * max_demo_channels];
+    float tone_buffer[tone_chunk_frames * kMaxDemoChannels];
+    float capture_buffer[capture_chunk_frames * kMaxDemoChannels];
+    float loopback_buffer[capture_chunk_frames * kMaxDemoChannels];
+    float channel_gains[kMaxDemoChannels];
     SDL_Gamepad *active_gamepad;
     const bool *keyboard;
     bool has_gamepad;
     bool audio_active;
     bool monitoring_enabled;
     int playback_channels;
+    float left_x;
+    float left_y;
+    float pan_x;
+    float pan_y;
     float right_x;
     float right_trigger;
     int queued_bytes;
@@ -134,6 +353,8 @@ void UpdateAudioDemo(AppState *state)
     keyboard = SDL_GetKeyboardState(nullptr);
     has_gamepad = active_gamepad && SDL_GamepadConnected(active_gamepad);
     audio_active = IsAnyInputButtonPressed(state);
+    left_x = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFTX)) : 0.0f;
+    left_y = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_LEFTY)) : 0.0f;
     right_x = has_gamepad ? AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_RIGHTX)) : 0.0f;
     right_trigger = has_gamepad ? SDL_max(0.0f, AxisToFloat(SDL_GetGamepadAxis(active_gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER))) : 0.0f;
     monitoring_enabled = audio_active &&
@@ -141,8 +362,13 @@ void UpdateAudioDemo(AppState *state)
                           (has_gamepad && SDL_GetGamepadButton(active_gamepad, SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)));
     state->audio.monitoring_enabled = monitoring_enabled;
     playback_channels = SDL_max((int)state->audio.mix_spec.channels, 1);
+    state->audio.playback_channels = playback_channels;
     queued_bytes = SDL_GetAudioStreamQueued(state->audio.playback_stream);
     target_queue_bytes = tone_chunk_frames * 6 * (int)sizeof(float) * playback_channels;
+    state->audio.pan_amount = ApplyPanDeadzone(left_x, -left_y, &pan_x, &pan_y);
+    state->audio.pan_x = pan_x;
+    state->audio.pan_y = pan_y;
+    BuildSpatialMix(playback_channels, pan_x, pan_y, channel_gains);
 
     state->audio.tone_frequency = 220.0f + (right_x + 1.0f) * 220.0f;
     state->audio.tone_gain += ((0.05f + right_trigger * 0.18f) - state->audio.tone_gain) * 0.18f;
@@ -196,28 +422,9 @@ void UpdateAudioDemo(AppState *state)
             const float base = SDL_sinf(phase);
             const float overtone = SDL_sinf(phase * 2.0f + 0.6f) * 0.25f;
             const float sample = (base + overtone) * state->audio.tone_gain;
-            const float front = sample * 0.9f;
 
             for (int channel = 0; channel < playback_channels; ++channel) {
-                float value = front;
-
-                if (playback_channels >= 6) {
-                    switch (channel) {
-                    case 2:
-                        value = sample * 0.7f;
-                        break;
-                    case 3:
-                        value = sample * 0.45f;
-                        break;
-                    case 4:
-                    case 5:
-                        value = sample * 0.55f;
-                        break;
-                    default:
-                        break;
-                    }
-                }
-
+                const float value = sample * channel_gains[channel];
                 tone_buffer[(i * playback_channels) + channel] = value;
                 tone_peak = SDL_max(tone_peak, SDL_fabsf(value));
             }
@@ -254,13 +461,18 @@ bool RenderAudioWidget(AppState *state, const SDL_FRect &rect)
     const float playback_amount = SDL_clamp(state->audio.playback_level, 0.0f, 1.0f);
     const float capture_amount = SDL_clamp(state->audio.capture_level, 0.0f, 1.0f);
     const float loopback_amount = SDL_clamp(state->audio.loopback_level, 0.0f, 1.0f);
+    const float pan_x = state->audio.pan_x;
+    const float pan_y = (state->audio.playback_channels >= 4) ? state->audio.pan_y : 0.0f;
+    const float pan_amount = SDL_clamp(state->audio.pan_amount, 0.0f, 1.0f);
     const SDL_FRect tone_bar = { rect.x + padding, rect.y + 20.0f, meter_w, bar_h };
     const SDL_FRect playback_bar = { tone_bar.x, tone_bar.y + bar_h + bar_gap, meter_w, bar_h };
     const SDL_FRect capture_bar = { tone_bar.x, playback_bar.y + bar_h + bar_gap, meter_w, bar_h };
     const SDL_FRect loopback_bar = { tone_bar.x, capture_bar.y + bar_h + bar_gap, meter_w, bar_h };
-    const float orb_x = rect.x + rect.w - 40.0f;
-    const float orb_y = rect.y + rect.h - 34.0f;
-    const float orb_radius = 14.0f + playback_amount * 12.0f + capture_amount * 6.0f;
+    const SDL_FRect pan_rect = { rect.x + rect.w - 62.0f, rect.y + rect.h - 54.0f, 44.0f, 44.0f };
+    const float pan_center_x = pan_rect.x + pan_rect.w * 0.5f;
+    const float pan_center_y = pan_rect.y + pan_rect.h * 0.5f;
+    const float pan_scale = (pan_rect.w - 10.0f) * 0.5f;
+    char mode_label[24];
 
     if (!SetColor(state->renderer, 9, 14, 30, 228) ||
         !SDL_RenderFillRect(state->renderer, &rect) ||
@@ -324,21 +536,68 @@ bool RenderAudioWidget(AppState *state, const SDL_FRect &rect)
         }
     }
 
-    if (!SetColor(state->renderer,
-                  (Uint8)(50 + playback_amount * 150.0f),
-                  (Uint8)(70 + capture_amount * 170.0f),
-                  (Uint8)(120 + loopback_amount * 120.0f),
-                  255) ||
-        !FillCircle(state->renderer, orb_x, orb_y, orb_radius)) {
+    SDL_snprintf(mode_label, sizeof(mode_label), "L pan %s", GetPlaybackModeLabel(state->audio.playback_channels));
+
+    if (!SetColor(state->renderer, 18, 26, 54, 255) ||
+        !SDL_RenderFillRect(state->renderer, &pan_rect) ||
+        !SetColor(state->renderer, 65, 96, 150, 255) ||
+        !SDL_RenderRect(state->renderer, &pan_rect) ||
+        !SetColor(state->renderer, 55, 84, 132, 255) ||
+        !SDL_RenderLine(state->renderer, pan_center_x, pan_rect.y + 2.0f, pan_center_x, pan_rect.y + pan_rect.h - 2.0f) ||
+        !SDL_RenderLine(state->renderer, pan_rect.x + 2.0f, pan_center_y, pan_rect.x + pan_rect.w - 2.0f, pan_center_y)) {
         return false;
     }
 
     {
-        const SDL_FRect core = { orb_x - 6.0f, orb_y - 6.0f, 12.0f, 12.0f };
-        if (!SetColor(state->renderer, 15, 18, 42, 255) ||
-            !SDL_RenderFillRect(state->renderer, &core)) {
+        const SDL_FRect listener = { pan_center_x - 3.0f, pan_center_y - 3.0f, 6.0f, 6.0f };
+        const SDL_FRect front_left = { pan_rect.x + 3.0f, pan_rect.y + 3.0f, 4.0f, 4.0f };
+        const SDL_FRect front_right = { pan_rect.x + pan_rect.w - 7.0f, pan_rect.y + 3.0f, 4.0f, 4.0f };
+        const SDL_FRect back_left = { pan_rect.x + 3.0f, pan_rect.y + pan_rect.h - 7.0f, 4.0f, 4.0f };
+        const SDL_FRect back_right = { pan_rect.x + pan_rect.w - 7.0f, pan_rect.y + pan_rect.h - 7.0f, 4.0f, 4.0f };
+
+        if (!SetColor(state->renderer, 80, 110, 180, 255) ||
+            !SDL_RenderFillRect(state->renderer, &front_left) ||
+            !SDL_RenderFillRect(state->renderer, &front_right) ||
+            !SDL_RenderFillRect(state->renderer, &listener)) {
             return false;
         }
+
+        if (state->audio.playback_channels >= 4 &&
+            (!SDL_RenderFillRect(state->renderer, &back_left) ||
+             !SDL_RenderFillRect(state->renderer, &back_right))) {
+            return false;
+        }
+
+        if (state->audio.playback_channels >= 6) {
+            const SDL_FRect front_center = { pan_center_x - 2.0f, pan_rect.y + 2.0f, 4.0f, 4.0f };
+            if (!SDL_RenderFillRect(state->renderer, &front_center)) {
+                return false;
+            }
+        }
+    }
+
+    if (pan_amount > 0.0f &&
+        (!SetColor(state->renderer, 255, 196, 120, 255) ||
+         !SDL_RenderLine(state->renderer,
+                         pan_center_x,
+                         pan_center_y,
+                         pan_center_x + pan_x * pan_scale,
+                         pan_center_y - pan_y * pan_scale))) {
+        return false;
+    }
+
+    if (!SetColor(state->renderer,
+                  (Uint8)(120 + playback_amount * 110.0f),
+                  (Uint8)(140 + capture_amount * 60.0f),
+                  (Uint8)(255 - loopback_amount * 70.0f),
+                  255) ||
+        !FillCircle(state->renderer,
+                    pan_center_x + pan_x * pan_scale,
+                    pan_center_y - pan_y * pan_scale,
+                    4.0f + playback_amount * 3.0f) ||
+        !SetColor(state->renderer, 215, 225, 255, 255) ||
+        !SDL_RenderDebugText(state->renderer, rect.x + padding, rect.y + rect.h - 14.0f, mode_label)) {
+        return false;
     }
 
     return true;

@@ -55,9 +55,13 @@ struct AudioDemoState
     float tone_phase;
     float tone_frequency;
     float tone_gain;
+    float pan_x;
+    float pan_y;
+    float pan_amount;
     float playback_level;
     float capture_level;
     float loopback_level;
+    int playback_channels;
     bool capture_available;
     bool monitoring_enabled;
 };
